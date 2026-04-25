@@ -2,8 +2,7 @@
 
 An educational C++20 / SFML application that visualizes, in real time, the
 relationship between temperature, doping, and the electronic structure of a
-semiconductor (silicon). Designed as a Materials Science & Engineering
-portfolio project.
+semiconductor (silicon).
 
 ![screenshot placeholder](docs/screenshot.png)
 
