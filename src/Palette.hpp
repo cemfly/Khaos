@@ -16,6 +16,7 @@
 
 #include <SFML/Graphics.hpp>
 
+#include <cstdint>
 #include <string>
 
 
@@ -85,6 +86,41 @@ namespace palette {
         t.setFillColor(colour);
         t.setPosition(pos);
         return t;
+    }
+
+    // -----------------------------------------------------------------------
+    // Heatmap colour ramp (approximate viridis).
+    //
+    //   t in [0, 1]  ->  RGB tuned for perceptual uniformity, dark purple at
+    //   the low end, bright yellow at the high end. Values outside [0, 1]
+    //   are clamped.
+    // -----------------------------------------------------------------------
+    [[nodiscard]] inline sf::Color heatColor(float t) noexcept {
+        if (t <= 0.0f) return sf::Color( 68,  1, 84);
+        if (t >= 1.0f) return sf::Color(253,231, 37);
+
+        // Six-stop linear interpolation -- looks viridis-ish without a LUT.
+        struct Stop { float t; sf::Color c; };
+        static const Stop stops[] = {
+            {0.00f, sf::Color( 68,  1, 84)},
+            {0.20f, sf::Color( 59, 82,139)},
+            {0.40f, sf::Color( 33,144,141)},
+            {0.60f, sf::Color( 94,201, 98)},
+            {0.80f, sf::Color(190,222, 47)},
+            {1.00f, sf::Color(253,231, 37)},
+        };
+        for (int k = 0; k + 1 < 6; ++k) {
+            if (t <= stops[k + 1].t) {
+                const float u = (t - stops[k].t)
+                              / (stops[k + 1].t - stops[k].t);
+                const auto a = stops[k].c, b = stops[k + 1].c;
+                return sf::Color(
+                    static_cast<std::uint8_t>(a.r + u * (b.r - a.r)),
+                    static_cast<std::uint8_t>(a.g + u * (b.g - a.g)),
+                    static_cast<std::uint8_t>(a.b + u * (b.b - a.b)));
+            }
+        }
+        return sf::Color(253, 231, 37);
     }
 
 } // namespace palette
