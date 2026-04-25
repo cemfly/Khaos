@@ -55,7 +55,7 @@ option(BUILD_TESTS "Build the GoogleTest unit-test suite"                   OFF)
 #   1) find_package() first (system install, vcpkg, Conan, ...).
 #   2) If FETCH_SFML=ON, fall back to FetchContent (pulls SFML 2.6.1).
 # =============================================================================
-find_package(SFML 2.5 COMPONENTS graphics window system QUIET)
+find_package(SFML 3 COMPONENTS Graphics Window System QUIET)
 
 if(NOT SFML_FOUND)
     if(FETCH_SFML)
@@ -64,12 +64,12 @@ if(NOT SFML_FOUND)
         FetchContent_Declare(
             SFML
             GIT_REPOSITORY https://github.com/SFML/SFML.git
-            GIT_TAG        2.6.1
+            GIT_TAG        3.0.0
         )
         FetchContent_MakeAvailable(SFML)
     else()
         message(FATAL_ERROR
-            "SFML 2.5+ not found.\n"
+            "SFML 3 not found.\n"
             "  * Install it with your package manager "
             "(apt/dnf/pacman/brew), or\n"
             "  * pass -DSFML_DIR=<path>/SFML/lib/cmake/SFML, or\n"
@@ -105,9 +105,9 @@ add_executable(${PROJECT_NAME}
 target_include_directories(${PROJECT_NAME} PRIVATE src)
 
 target_link_libraries(${PROJECT_NAME} PRIVATE
-    sfml-graphics
-    sfml-window
-    sfml-system
+    SFML::Graphics
+    SFML::Window
+    SFML::System
 )
 
 # Copy `assets/` next to the binary so the font loader can find it when the
@@ -120,13 +120,13 @@ add_custom_command(
 )
 
 # On Windows with shared SFML, ship the DLLs next to the binary.
-if(WIN32 AND TARGET sfml-graphics)
+if(WIN32 AND TARGET SFML::Graphics)
     add_custom_command(
         TARGET ${PROJECT_NAME} POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            $<TARGET_FILE:sfml-graphics>
-            $<TARGET_FILE:sfml-window>
-            $<TARGET_FILE:sfml-system>
+            $<TARGET_FILE:SFML::Graphics>
+            $<TARGET_FILE:SFML::Window>
+            $<TARGET_FILE:SFML::System>
             $<TARGET_FILE_DIR:${PROJECT_NAME}>
         COMMAND_EXPAND_LISTS
     )

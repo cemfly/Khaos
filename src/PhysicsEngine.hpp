@@ -185,75 +185,76 @@ public:
     void setMagneticField        (double B_tesla);
 
     // ------------------------- Query: user inputs ---------------------------
-    double        getTemperature()           const { return m_T;                    }
-    DopingType    getDopingType()            const { return m_dopingType;           }
-    double        getDopingConcentration()   const { return m_N;                    }
-    bool          getIncompleteIonization()  const { return m_incompleteIonization; }
-    MobilityModel getMobilityModel()         const { return m_mobilityModel;        }
-    double        getWavelengthNm()          const { return m_lambda_nm;            }
-    bool          getOpticalEnabled()        const { return m_opticalEnabled;       }
-    double        getMagneticField()         const { return m_B;                    }
+    [[nodiscard]] double        getTemperature()           const noexcept { return m_T;                    }
+    [[nodiscard]] DopingType    getDopingType()            const noexcept { return m_dopingType;           }
+    [[nodiscard]] double        getDopingConcentration()   const noexcept { return m_N;                    }
+    [[nodiscard]] bool          getIncompleteIonization()  const noexcept { return m_incompleteIonization; }
+    [[nodiscard]] MobilityModel getMobilityModel()         const noexcept { return m_mobilityModel;        }
+    [[nodiscard]] double        getWavelengthNm()          const noexcept { return m_lambda_nm;            }
+    [[nodiscard]] bool          getOpticalEnabled()        const noexcept { return m_opticalEnabled;       }
+    [[nodiscard]] double        getMagneticField()         const noexcept { return m_B;                    }
 
     // ------------------------- Query: thermodynamic state -------------------
-    double getBandgap()               const { return m_Eg;    }
-    double getEffectiveNc()           const { return m_Nc;    }
-    double getEffectiveNv()           const { return m_Nv;    }
-    double getIntrinsicCarrier()      const { return m_ni;    }
-    double getElectronConcentration() const { return m_n;     }
-    double getHoleConcentration()     const { return m_p;     }
-    double getFermiLevel()            const { return m_Ef;    }
+    [[nodiscard]] double getBandgap()               const noexcept { return m_Eg; }
+    [[nodiscard]] double getEffectiveNc()           const noexcept { return m_Nc; }
+    [[nodiscard]] double getEffectiveNv()           const noexcept { return m_Nv; }
+    [[nodiscard]] double getIntrinsicCarrier()      const noexcept { return m_ni; }
+    [[nodiscard]] double getElectronConcentration() const noexcept { return m_n;  }
+    [[nodiscard]] double getHoleConcentration()     const noexcept { return m_p;  }
+    [[nodiscard]] double getFermiLevel()            const noexcept { return m_Ef; }
 
     // ------------------------- Query: ionization ----------------------------
-    double getIonizedDonors()         const { return m_NdPlus;   }
-    double getIonizedAcceptors()      const { return m_NaMinus;  }
-    double getIonizationFraction()    const;
+    [[nodiscard]] double getIonizedDonors()      const noexcept { return m_NdPlus;  }
+    [[nodiscard]] double getIonizedAcceptors()   const noexcept { return m_NaMinus; }
+    [[nodiscard]] double getIonizationFraction() const noexcept;
 
     // ------------------------- Query: transport -----------------------------
-    double getElectronMobility()      const { return m_mu_n;  }   // [cm^2/Vs]
-    double getHoleMobility()          const { return m_mu_p;  }   // [cm^2/Vs]
-    double getConductivity()          const { return m_sigma; }   // [S/cm]
-    double getResistivity()           const;                      // [Ohm cm]
+    [[nodiscard]] double getElectronMobility() const noexcept { return m_mu_n;  }  // [cm^2/Vs]
+    [[nodiscard]] double getHoleMobility()     const noexcept { return m_mu_p;  }  // [cm^2/Vs]
+    [[nodiscard]] double getConductivity()     const noexcept { return m_sigma; }  // [S/cm]
+    [[nodiscard]] double getResistivity()      const noexcept;                     // [Ohm cm]
 
     // Quasi-total carrier densities including optical excess.
-    double getTotalElectronConc()     const { return m_n + m_deltaN; }
-    double getTotalHoleConc()         const { return m_p + m_deltaN; }
+    [[nodiscard]] double getTotalElectronConc() const noexcept { return m_n + m_deltaN; }
+    [[nodiscard]] double getTotalHoleConc()     const noexcept { return m_p + m_deltaN; }
 
     // ------------------------- Query: optical -------------------------------
-    double getPhotonEnergy()          const { return m_Ephoton; }  // [eV]
-    double getOpticalGeneration()     const { return m_Gopt;    }  // [cm^-3/s]
-    double getExcessCarrierDensity()  const { return m_deltaN;  }  // [cm^-3]
-    bool   isOpticallyPumped()        const;
+    [[nodiscard]] double getPhotonEnergy()         const noexcept { return m_Ephoton; } // [eV]
+    [[nodiscard]] double getOpticalGeneration()    const noexcept { return m_Gopt;    } // [cm^-3/s]
+    [[nodiscard]] double getExcessCarrierDensity() const noexcept { return m_deltaN;  } // [cm^-3]
+    [[nodiscard]] bool   isOpticallyPumped()       const noexcept;
 
     // ------------------------- Query: Hall / magnetic -----------------------
-    double getHallCoefficient()       const { return m_R_H;     }  // [cm^3/C]
-    double getHallVoltage(double I_A, double thickness_cm,
-                          double B_T)  const;                      // [V]
+    [[nodiscard]] double getHallCoefficient() const noexcept { return m_R_H; }      // [cm^3/C]
+    [[nodiscard]] double getHallVoltage(double current_A,
+                                        double thickness_cm,
+                                        double field_T) const noexcept;            // [V]
 
     // ------------------------- Band / dopant levels -------------------------
-    double getValenceBandEdge()       const { return 0.0;  }
-    double getConductionBandEdge()    const { return m_Eg; }
-    double getDonorLevel()            const { return m_Eg - phys::E_donor_offset;   }
-    double getAcceptorLevel()         const { return       phys::E_acceptor_offset; }
+    [[nodiscard]] double getValenceBandEdge()    const noexcept { return 0.0;  }
+    [[nodiscard]] double getConductionBandEdge() const noexcept { return m_Eg; }
+    [[nodiscard]] double getDonorLevel()         const noexcept { return m_Eg - phys::E_donor_offset;   }
+    [[nodiscard]] double getAcceptorLevel()      const noexcept { return       phys::E_acceptor_offset; }
 
     // Occupation probability at energy E [eV, relative to E_v].
-    double fermiDirac(double E) const;
+    [[nodiscard]] double fermiDirac(double E) const noexcept;
 
     // ------------------------------------------------------------------------
     // CSV export: appends a single row describing the current state.
     // Writes the header row the first time the file is created.
     // ------------------------------------------------------------------------
-    bool exportCSV(const std::string& path) const;
+    [[nodiscard]] bool exportCSV(const std::string& path) const;
 
     // ------------------------------------------------------------------------
     // Static mobility helpers (exposed for unit tests).
     // ------------------------------------------------------------------------
-    static double matthiessenMobilityElectron(double T, double N);
-    static double matthiessenMobilityHole    (double T, double N);
-    static double aroraMobilityElectron      (double T, double N);
-    static double aroraMobilityHole          (double T, double N);
+    [[nodiscard]] static double matthiessenMobilityElectron(double T, double N) noexcept;
+    [[nodiscard]] static double matthiessenMobilityHole    (double T, double N) noexcept;
+    [[nodiscard]] static double aroraMobilityElectron      (double T, double N) noexcept;
+    [[nodiscard]] static double aroraMobilityHole          (double T, double N) noexcept;
 
     // Helper: photon energy in eV for a given wavelength in nm.
-    static double photonEnergyEv(double lambda_nm);
+    [[nodiscard]] static double photonEnergyEv(double lambda_nm) noexcept;
 
 private:
     // Driver & solvers

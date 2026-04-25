@@ -22,46 +22,60 @@
 
 #include <SFML/Graphics.hpp>
 
+#include <array>
+#include <filesystem>
 #include <iostream>
 #include <memory>
-#include <string>
-#include <vector>
+#include <optional>
+#include <string_view>
 
 #include "BandDiagram.hpp"
 #include "CrystalLattice.hpp"
+#include "Palette.hpp"
 #include "PhysicsEngine.hpp"
 #include "UIPanel.hpp"
 
 
 // -----------------------------------------------------------------------------
-// Font loader: tries a few common locations so the project works out-of-the-box
-// on Linux and Windows. If no font can be loaded, the program still runs but
-// text labels will be missing.
+// Font loader
 // -----------------------------------------------------------------------------
-static bool loadFont(sf::Font& font) {
-    const std::vector<std::string> candidates = {
-        // Project-local fallback (see assets/README.md).
-        "assets/font.ttf",
-        "../assets/font.ttf",
-        // Common Linux locations.
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-        "/usr/share/fonts/TTF/DejaVuSans.ttf",
-        // Common Windows locations.
-        "C:/Windows/Fonts/arial.ttf",
-        "C:/Windows/Fonts/segoeui.ttf",
-    };
+// Probes a fixed list of well-known font locations (cross-platform). Only the
+// paths that actually exist on disk are reported to sf::Font::openFromFile so
+// that the console is not polluted with SFML's "file not found" warnings for
+// paths that are obviously not going to exist (e.g. Linux paths on Windows).
+// Returns true on the first successful load.
+// -----------------------------------------------------------------------------
+namespace {
 
-    for (const auto& path : candidates) {
-        if (font.loadFromFile(path)) {
-            std::cout << "[info] Loaded font: " << path << "\n";
+constexpr std::array<std::string_view, 7> kFontCandidates{
+    // Project-local (preferred -- copied into build/ by CMake).
+    "assets/font.ttf",
+    "../assets/font.ttf",
+    // Common Linux locations.
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+    "/usr/share/fonts/TTF/DejaVuSans.ttf",
+    // Common Windows locations.
+    "C:/Windows/Fonts/arial.ttf",
+    "C:/Windows/Fonts/segoeui.ttf",
+};
+
+[[nodiscard]] bool loadFont(sf::Font& font) {
+    for (const auto path : kFontCandidates) {
+        const std::filesystem::path fp{path};
+        std::error_code ec;
+        if (!std::filesystem::exists(fp, ec)) continue;
+        if (font.openFromFile(fp)) {
+            std::cout << "[info] Loaded font: " << fp.string() << '\n';
             return true;
         }
     }
-    std::cerr << "[warn] Could not load any font. "
-                 "Place a TTF at assets/font.ttf.\n";
+    std::cerr << "[warn] No usable font found. "
+                 "Drop a .ttf at assets/font.ttf.\n";
     return false;
 }
+
+} // namespace
 
 
 int main() {
@@ -72,7 +86,7 @@ int main() {
     constexpr unsigned winH = 900;
 
     sf::RenderWindow window(
-        sf::VideoMode(winW, winH),
+        sf::VideoMode({winW, winH}),
         "Interactive Semiconductor Bandgap & Doping Simulator",
         sf::Style::Titlebar | sf::Style::Close);
     window.setFramerateLimit(60);
@@ -81,7 +95,7 @@ int main() {
     // Resources
     // -------------------------------------------------------------------------
     sf::Font font;
-    loadFont(font);   // continue even if this fails
+    (void)loadFont(font);   // non-fatal if it fails
 
     // -------------------------------------------------------------------------
     // Simulation components  (owned by smart pointers; created once here).
@@ -116,16 +130,19 @@ int main() {
         const sf::Vector2f mousePos =
             window.mapPixelToCoords(sf::Mouse::getPosition(window));
 
-        // ---- Event handling ------------------------------------------------
-        sf::Event event;
-        while (window.pollEvent(event)) {
-            if (event.type == sf::Event::Closed)
+        // ---- Event handling (SFML 3 optional-based polling) ---------------
+        while (const std::optional<sf::Event> event = window.pollEvent()) {
+            if (event->is<sf::Event::Closed>()) {
                 window.close();
-            if (event.type == sf::Event::KeyPressed &&
-                event.key.code == sf::Keyboard::Escape)
-                window.close();
+            }
+            else if (const auto* keyEv =
+                         event->getIf<sf::Event::KeyPressed>())
+            {
+                if (keyEv->code == sf::Keyboard::Key::Escape)
+                    window.close();
+            }
 
-            if (ui->handleEvent(event, mousePos, *physics)) {
+            if (ui->handleEvent(*event, mousePos, *physics)) {
                 lattice->rebuild(*physics);
             }
         }
@@ -135,7 +152,7 @@ int main() {
         lattice->update(dt, *physics);
 
         // ---- Render --------------------------------------------------------
-        window.clear(sf::Color(10, 12, 18));
+        window.clear(palette::WindowBg);
 
         lattice->draw(window);
         bands->draw(window, *physics, font);

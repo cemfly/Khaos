@@ -115,6 +115,9 @@ public:
 
 private:
     void performCSVExport(const PhysicsEngine& physics);
+    void drawReadouts(sf::RenderTarget&    target,
+                      const PhysicsEngine& physics,
+                      const sf::Font&      font) const;
 
     sf::Vector2f m_pos;
     sf::Vector2f m_size;

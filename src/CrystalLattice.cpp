@@ -3,6 +3,9 @@
 #include <algorithm>
 #include <cmath>
 
+#include "Palette.hpp"
+
+
 // =============================================================================
 // Construction / geometry
 // =============================================================================
@@ -29,13 +32,21 @@ CrystalLattice::CrystalLattice(const sf::Vector2f& topLeft,
 }
 
 // =============================================================================
-// Log-scaled carrier-count mapping: physical densities span many orders of
-// magnitude (1e10..1e20), so we squash them into a bounded visual count.
+// Log-scaled carrier-count mapping.
+//
+// Physical densities span many orders of magnitude (n_i(100K) ~ 1 cm^-3
+// all the way up to heavily doped 1e20). We squash that range into a
+// bounded visual count so the lattice view stays legible.
+//
+//   log10(N) = 8   ->  0   carriers
+//   log10(N) = 10  ->  ~12 carriers  (intrinsic Si at 300 K -> still visible)
+//   log10(N) = 16  ->  ~56 carriers
+//   log10(N) = 20  ->  ~96 carriers  (clamped below 120)
 // =============================================================================
 int CrystalLattice::targetCarrierCount(double concentration) const {
     if (concentration <= 0.0) return 0;
-    const double logN = std::log10(concentration);
-    const double scaled = (logN - 10.0) * 8.0;
+    const double logN   = std::log10(concentration);
+    const double scaled = (logN - 8.0) * 6.0;
     return static_cast<int>(std::clamp(scaled, 0.0, 120.0));
 }
 
@@ -174,26 +185,26 @@ void CrystalLattice::draw(sf::RenderTarget& target) const {
     // Background
     sf::RectangleShape bg(m_size);
     bg.setPosition(m_topLeft);
-    bg.setFillColor(sf::Color(18, 22, 30));
-    bg.setOutlineColor(sf::Color(80, 90, 110));
+    bg.setFillColor(palette::ViewBg);
+    bg.setOutlineColor(palette::PanelEdge);
     bg.setOutlineThickness(1.f);
     target.draw(bg);
 
     // Bonds
-    sf::VertexArray bonds(sf::Lines);
+    sf::VertexArray bonds(sf::PrimitiveType::Lines);
     for (int r = 0; r < m_rows; ++r) {
         for (int c = 0; c < m_cols; ++c) {
             const auto& a = m_atoms[r * m_cols + c];
             const sf::Color col(70, 80, 100);
             if (c + 1 < m_cols) {
                 const auto& b = m_atoms[r * m_cols + (c + 1)];
-                bonds.append(sf::Vertex(a.pos, col));
-                bonds.append(sf::Vertex(b.pos, col));
+                bonds.append(sf::Vertex{a.pos, col});
+                bonds.append(sf::Vertex{b.pos, col});
             }
             if (r + 1 < m_rows) {
                 const auto& b = m_atoms[(r + 1) * m_cols + c];
-                bonds.append(sf::Vertex(a.pos, col));
-                bonds.append(sf::Vertex(b.pos, col));
+                bonds.append(sf::Vertex{a.pos, col});
+                bonds.append(sf::Vertex{b.pos, col});
             }
         }
     }
@@ -202,21 +213,21 @@ void CrystalLattice::draw(sf::RenderTarget& target) const {
     // Atoms
     const float radius = std::min(m_cellW, m_cellH) * 0.25f;
     sf::CircleShape atomShape(radius);
-    atomShape.setOrigin(radius, radius);
+    atomShape.setOrigin({radius, radius});
     for (const auto& a : m_atoms) {
         switch (a.type) {
             case AtomType::Silicon:
-                atomShape.setFillColor(sf::Color(120, 170, 220));
+                atomShape.setFillColor(palette::Silicon);
                 atomShape.setOutlineColor(sf::Color(200, 220, 240));
                 atomShape.setOutlineThickness(1.f);
                 break;
             case AtomType::Phosphorus:
-                atomShape.setFillColor(sf::Color( 80, 220, 120));
+                atomShape.setFillColor(palette::Phosphorus);
                 atomShape.setOutlineColor(sf::Color(220, 255, 200));
                 atomShape.setOutlineThickness(1.5f);
                 break;
             case AtomType::Boron:
-                atomShape.setFillColor(sf::Color(230, 110, 110));
+                atomShape.setFillColor(palette::Boron);
                 atomShape.setOutlineColor(sf::Color(255, 200, 200));
                 atomShape.setOutlineThickness(1.5f);
                 break;
@@ -228,23 +239,19 @@ void CrystalLattice::draw(sf::RenderTarget& target) const {
     // Carriers.  Optical carriers are rendered slightly larger and with a
     // halo so illumination is visually obvious.
     sf::CircleShape dot(3.f);
-    dot.setOrigin(3.f, 3.f);
+    dot.setOrigin({3.f, 3.f});
     for (const auto& c : m_carriers) {
-        sf::Color fill, outline;
-        if (c.electron) {
-            fill    = c.optical ? sf::Color(140, 255, 255)
-                                : sf::Color(255, 230,  80);
-            outline = sf::Color(255, 255, 220);
-        } else {
-            fill    = c.optical ? sf::Color(255, 180, 255)
-                                : sf::Color(255,  80, 200);
-            outline = sf::Color(255, 220, 240);
-        }
+        const sf::Color fill = c.electron
+            ? (c.optical ? palette::ElectronOpt : palette::Electron)
+            : (c.optical ? palette::HoleOpt     : palette::Hole);
+        const sf::Color outline = c.electron ? sf::Color(255, 255, 220)
+                                             : sf::Color(255, 220, 240);
         dot.setFillColor(fill);
         dot.setOutlineColor(outline);
         dot.setOutlineThickness(c.optical ? 1.5f : 1.f);
-        dot.setRadius(c.optical ? 4.f : 3.f);
-        dot.setOrigin(c.optical ? 4.f : 3.f, c.optical ? 4.f : 3.f);
+        const float r = c.optical ? 4.f : 3.f;
+        dot.setRadius(r);
+        dot.setOrigin({r, r});
         dot.setPosition(c.pos);
         target.draw(dot);
     }

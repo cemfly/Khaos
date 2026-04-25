@@ -6,37 +6,27 @@
 #include <sstream>
 #include <string>
 
+#include "Palette.hpp"
+
+using palette::makeText;
+using palette::wavelengthColor;
+
 
 // =============================================================================
 // Local helpers
 // =============================================================================
 namespace {
 
-    std::string formatSci(double v, int precision = 2) {
+    [[nodiscard]] std::string sci(double v, int prec = 2) {
         std::ostringstream oss;
-        oss << std::scientific << std::setprecision(precision) << v;
+        oss << std::scientific << std::setprecision(prec) << v;
         return oss.str();
     }
 
-    std::string formatFixed(double v, int precision = 3) {
+    [[nodiscard]] std::string fix(double v, int prec = 3) {
         std::ostringstream oss;
-        oss << std::fixed << std::setprecision(precision) << v;
+        oss << std::fixed << std::setprecision(prec) << v;
         return oss.str();
-    }
-
-    sf::Text makeLabel(const std::string& str,
-                       const sf::Font&    font,
-                       unsigned int       size,
-                       sf::Color          color,
-                       const sf::Vector2f& pos)
-    {
-        sf::Text t;
-        t.setFont(font);
-        t.setString(str);
-        t.setCharacterSize(size);
-        t.setFillColor(color);
-        t.setPosition(pos);
-        return t;
     }
 
     void drawDashed(sf::RenderTarget& target,
@@ -45,24 +35,24 @@ namespace {
                     float dash = 8.f,
                     float gap  = 6.f)
     {
-        sf::VertexArray lines(sf::Lines);
+        sf::VertexArray lines(sf::PrimitiveType::Lines);
         for (float x = x1; x < x2; x += dash + gap) {
             const float xEnd = std::min(x + dash, x2);
-            lines.append(sf::Vertex({x,    y}, color));
-            lines.append(sf::Vertex({xEnd, y}, color));
+            lines.append(sf::Vertex{{x,    y}, color});
+            lines.append(sf::Vertex{{xEnd, y}, color});
         }
         target.draw(lines);
     }
 
-    // Draws a simple upward arrow (photon transition  VB -> CB).
+    // Upward photon-transition arrow (VB -> CB).
     void drawUpwardArrow(sf::RenderTarget& target,
                          float x, float yBottom, float yTop,
                          sf::Color color,
                          float headSize = 7.f)
     {
-        sf::VertexArray shaft(sf::Lines);
-        shaft.append(sf::Vertex({x, yBottom}, color));
-        shaft.append(sf::Vertex({x, yTop   }, color));
+        sf::VertexArray shaft(sf::PrimitiveType::Lines);
+        shaft.append(sf::Vertex{{x, yBottom}, color});
+        shaft.append(sf::Vertex{{x, yTop   }, color});
         target.draw(shaft);
 
         sf::ConvexShape head;
@@ -72,19 +62,6 @@ namespace {
         head.setPoint(2, {x + headSize,  yTop + headSize});
         head.setFillColor(color);
         target.draw(head);
-    }
-
-    // Same wavelength -> RGB mapping used in the UI panel; kept local to
-    // avoid an extra header dependency.
-    sf::Color wavelengthToColor(double lambda_nm) {
-        if (lambda_nm < 380.0 || lambda_nm > 780.0)
-            return sf::Color(180, 180, 200);
-        if (lambda_nm < 440.0) return sf::Color(130, 100, 255);
-        if (lambda_nm < 490.0) return sf::Color( 90, 180, 255);
-        if (lambda_nm < 510.0) return sf::Color( 80, 255, 220);
-        if (lambda_nm < 580.0) return sf::Color(120, 255, 120);
-        if (lambda_nm < 645.0) return sf::Color(255, 220,  80);
-        return                        sf::Color(255, 110,  90);
     }
 
 } // namespace
@@ -106,15 +83,15 @@ float BandDiagram::energyToY(double E) const {
 // =============================================================================
 // Rendering
 // =============================================================================
-void BandDiagram::draw(sf::RenderTarget&   target,
+void BandDiagram::draw(sf::RenderTarget&    target,
                        const PhysicsEngine& physics,
                        const sf::Font&      font) const
 {
     // Background
     sf::RectangleShape bg(m_size);
     bg.setPosition(m_topLeft);
-    bg.setFillColor(sf::Color(18, 22, 30));
-    bg.setOutlineColor(sf::Color(80, 90, 110));
+    bg.setFillColor(palette::ViewBg);
+    bg.setOutlineColor(palette::PanelEdge);
     bg.setOutlineThickness(1.f);
     target.draw(bg);
 
@@ -124,9 +101,8 @@ void BandDiagram::draw(sf::RenderTarget&   target,
     const float fdX1   = m_topLeft.x + bandW + 10.f;
     const float fdX2   = m_topLeft.x + m_size.x - 15.f;
 
-    target.draw(makeLabel("Energy Band Diagram", font, 16,
-                          sf::Color(220, 220, 230),
-                          {m_topLeft.x + 10.f, m_topLeft.y + 6.f}));
+    target.draw(makeText(font, "Energy Band Diagram", 16, palette::TextLight,
+                         {m_topLeft.x + 10.f, m_topLeft.y + 6.f}));
 
     // Pull physics state
     const double     Ev = physics.getValenceBandEdge();
@@ -141,7 +117,7 @@ void BandDiagram::draw(sf::RenderTarget&   target,
         sf::RectangleShape r;
         const float yTop = energyToY(Ev);
         const float yBot = energyToY(m_Emin);
-        r.setPosition(bandX1, yTop);
+        r.setPosition({bandX1, yTop});
         r.setSize({bandX2 - bandX1, yBot - yTop});
         r.setFillColor(sf::Color(40, 100, 160, 120));
         target.draw(r);
@@ -151,7 +127,7 @@ void BandDiagram::draw(sf::RenderTarget&   target,
         sf::RectangleShape r;
         const float yTop = energyToY(m_Emax);
         const float yBot = energyToY(Ec);
-        r.setPosition(bandX1, yTop);
+        r.setPosition({bandX1, yTop});
         r.setSize({bandX2 - bandX1, yBot - yTop});
         r.setFillColor(sf::Color(160, 80, 40, 120));
         target.draw(r);
@@ -162,89 +138,77 @@ void BandDiagram::draw(sf::RenderTarget&   target,
                         const std::string& label, const std::string& value)
     {
         const float y = energyToY(E);
-        sf::VertexArray line(sf::Lines);
-        line.append(sf::Vertex({bandX1, y}, col));
-        line.append(sf::Vertex({bandX2, y}, col));
+        sf::VertexArray line(sf::PrimitiveType::Lines);
+        line.append(sf::Vertex{{bandX1, y}, col});
+        line.append(sf::Vertex{{bandX2, y}, col});
         target.draw(line);
-        target.draw(makeLabel(label, font, 13, col,
-                              {bandX1 - 5.f, y - 18.f}));
-        target.draw(makeLabel(value, font, 11, sf::Color(200, 200, 210),
-                              {bandX2 - 90.f, y - 16.f}));
+        target.draw(makeText(font, label, 13, col,
+                             {bandX1 - 5.f, y - 18.f}));
+        target.draw(makeText(font, value, 11, palette::TextDim,
+                             {bandX2 - 90.f, y - 16.f}));
     };
-    drawEdge(Ec, sf::Color(230, 140, 100),
-             "E_c", formatFixed(Ec, 3) + " eV");
-    drawEdge(Ev, sf::Color(120, 180, 230),
-             "E_v", formatFixed(Ev, 3) + " eV");
+    drawEdge(Ec, palette::ConductionBand, "E_c", fix(Ec, 3) + " eV");
+    drawEdge(Ev, palette::ValenceBand,    "E_v", fix(Ev, 3) + " eV");
 
     // Fermi level (dashed)
     {
         const float y = energyToY(Ef);
-        drawDashed(target, bandX1, bandX2, y,
-                   sf::Color(255, 240, 90), 9.f, 5.f);
-        target.draw(makeLabel("E_f", font, 13,
-                              sf::Color(255, 240, 90),
-                              {bandX1 - 5.f, y - 18.f}));
-        target.draw(makeLabel(formatFixed(Ef, 3) + " eV", font, 11,
-                              sf::Color(220, 220, 160),
-                              {bandX2 - 90.f, y - 16.f}));
+        drawDashed(target, bandX1, bandX2, y, palette::FermiLine, 9.f, 5.f);
+        target.draw(makeText(font, "E_f", 13, palette::FermiLine,
+                             {bandX1 - 5.f, y - 18.f}));
+        target.draw(makeText(font, fix(Ef, 3) + " eV", 11,
+                             sf::Color(220, 220, 160),
+                             {bandX2 - 90.f, y - 16.f}));
     }
 
     // Donor / acceptor level
     if (dt == DopingType::NType) {
         const float y = energyToY(Ed);
         drawDashed(target, bandX1 + 30.f, bandX2 - 30.f, y,
-                   sf::Color(80, 230, 140), 4.f, 3.f);
-        target.draw(makeLabel("E_d (donor)", font, 11,
-                              sf::Color(120, 240, 160),
-                              {bandX1 + 30.f, y - 16.f}));
+                   palette::DonorLevel, 4.f, 3.f);
+        target.draw(makeText(font, "E_d (donor)", 11,
+                             sf::Color(120, 240, 160),
+                             {bandX1 + 30.f, y - 16.f}));
     }
     else if (dt == DopingType::PType) {
         const float y = energyToY(Ea);
         drawDashed(target, bandX1 + 30.f, bandX2 - 30.f, y,
-                   sf::Color(240, 120, 120), 4.f, 3.f);
-        target.draw(makeLabel("E_a (acceptor)", font, 11,
-                              sf::Color(240, 140, 140),
-                              {bandX1 + 30.f, y - 16.f}));
+                   palette::AcceptorLevel, 4.f, 3.f);
+        target.draw(makeText(font, "E_a (acceptor)", 11,
+                             sf::Color(240, 140, 140),
+                             {bandX1 + 30.f, y - 16.f}));
     }
 
     // ---- Photon absorption arrow (only when hv > E_g) ---------------------
-    //
-    // Visualises the interband transition  E_v -> E_c  triggered by an
-    // incident photon of energy hv. The arrow starts at the valence band
-    // edge and climbs by hv (clamped to the plotting range). Its colour
-    // matches the selected wavelength.
-    //
-    // Reference: Kittel Ch. 15, Kasap Ch. 5.14.
     if (physics.isOpticallyPumped()) {
-        const double hv = physics.getPhotonEnergy();
+        const double hv    = physics.getPhotonEnergy();
         const double E_top = std::min<double>(Ev + hv, m_Emax - 0.02);
 
         const float  x  = bandX1 + 0.22f * (bandX2 - bandX1);
         const float  y0 = energyToY(Ev);
         const float  y1 = energyToY(E_top);
-        const sf::Color col = wavelengthToColor(physics.getWavelengthNm());
+        const sf::Color col = wavelengthColor(physics.getWavelengthNm());
 
         drawUpwardArrow(target, x, y0, y1, col);
-        target.draw(makeLabel("hv = " + formatFixed(hv, 3) + " eV",
-                              font, 11, col,
-                              {x + 10.f, y1 - 4.f}));
+        target.draw(makeText(font, "hv = " + fix(hv, 3) + " eV", 11, col,
+                             {x + 10.f, y1 - 4.f}));
     }
 
     // Energy axis ticks
     {
-        sf::VertexArray ticks(sf::Lines);
+        sf::VertexArray ticks(sf::PrimitiveType::Lines);
         const sf::Color axisCol(120, 130, 150);
         for (float E = 0.f; E <= m_Emax; E += 0.2f) {
             const float y = energyToY(E);
-            ticks.append(sf::Vertex({bandX1 - 4.f, y}, axisCol));
-            ticks.append(sf::Vertex({bandX1,       y}, axisCol));
+            ticks.append(sf::Vertex{{bandX1 - 4.f, y}, axisCol});
+            ticks.append(sf::Vertex{{bandX1,       y}, axisCol});
         }
         target.draw(ticks);
     }
 
     // ---- Fermi-Dirac curve panel -----------------------------------------
-    target.draw(makeLabel("f(E)", font, 13, sf::Color(220, 220, 230),
-                          {fdX1, m_topLeft.y + 26.f}));
+    target.draw(makeText(font, "f(E)", 13, palette::TextLight,
+                         {fdX1, m_topLeft.y + 26.f}));
     {
         sf::RectangleShape axisBox;
         axisBox.setPosition({fdX1, m_topLeft.y + 40.f});
@@ -255,14 +219,14 @@ void BandDiagram::draw(sf::RenderTarget&   target,
         target.draw(axisBox);
     }
     {
-        sf::VertexArray curve(sf::LineStrip);
+        sf::VertexArray curve(sf::PrimitiveType::LineStrip);
         const int samples = 120;
         for (int i = 0; i <= samples; ++i) {
             const double E = m_Emin + (m_Emax - m_Emin) * i / samples;
             const double f = physics.fermiDirac(E);
             const float  y = energyToY(E);
             const float  x = fdX1 + static_cast<float>(f) * (fdX2 - fdX1);
-            curve.append(sf::Vertex({x, y}, sf::Color(255, 240, 90)));
+            curve.append(sf::Vertex{{x, y}, palette::FermiLine});
         }
         target.draw(curve);
     }
@@ -270,27 +234,31 @@ void BandDiagram::draw(sf::RenderTarget&   target,
         const float y = energyToY(Ef);
         const float x = fdX1 + 0.5f * (fdX2 - fdX1);
         sf::CircleShape pt(3.f);
-        pt.setOrigin(3.f, 3.f);
-        pt.setPosition(x, y);
-        pt.setFillColor(sf::Color(255, 240, 90));
+        pt.setOrigin({3.f, 3.f});
+        pt.setPosition({x, y});
+        pt.setFillColor(palette::FermiLine);
         target.draw(pt);
     }
 
-    // ---- Numeric readouts -------------------------------------------------
+    // ---- Numeric readouts at bottom of the band panel ---------------------
     const float textX = m_topLeft.x + 10.f;
     float       textY = m_topLeft.y + m_size.y - 110.f;
-    const auto  col   = sf::Color(210, 215, 225);
 
-    target.draw(makeLabel("T     = " + formatFixed(physics.getTemperature(), 1) + " K",
-                          font, 12, col, {textX, textY})); textY += 16.f;
-    target.draw(makeLabel("E_g   = " + formatFixed(physics.getBandgap(), 4) + " eV",
-                          font, 12, col, {textX, textY})); textY += 16.f;
-    target.draw(makeLabel("n_i   = " + formatSci(physics.getIntrinsicCarrier()) + " cm^-3",
-                          font, 12, col, {textX, textY})); textY += 16.f;
-    target.draw(makeLabel("n     = " + formatSci(physics.getTotalElectronConc()) + " cm^-3",
-                          font, 12, sf::Color(255, 230, 80), {textX, textY})); textY += 16.f;
-    target.draw(makeLabel("p     = " + formatSci(physics.getTotalHoleConc()) + " cm^-3",
-                          font, 12, sf::Color(255, 100, 200), {textX, textY})); textY += 16.f;
-    target.draw(makeLabel("sigma = " + formatSci(physics.getConductivity()) + " S/cm",
-                          font, 12, sf::Color(140, 255, 180), {textX, textY}));
+    auto statusLine = [&](const std::string& s, sf::Color col) {
+        target.draw(makeText(font, s, 12, col, {textX, textY}));
+        textY += 16.f;
+    };
+
+    statusLine("T     = " + fix(physics.getTemperature(), 1) + " K",
+               palette::TextDim);
+    statusLine("E_g   = " + fix(physics.getBandgap(), 4) + " eV",
+               palette::TextDim);
+    statusLine("n_i   = " + sci(physics.getIntrinsicCarrier()) + " cm^-3",
+               palette::TextDim);
+    statusLine("n     = " + sci(physics.getTotalElectronConc()) + " cm^-3",
+               palette::Electron);
+    statusLine("p     = " + sci(physics.getTotalHoleConc()) + " cm^-3",
+               palette::Hole);
+    statusLine("sigma = " + sci(physics.getConductivity()) + " S/cm",
+               palette::Conductivity);
 }

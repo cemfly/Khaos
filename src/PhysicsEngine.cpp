@@ -80,7 +80,7 @@ void PhysicsEngine::setMagneticField(double B) {
 // Fermi-Dirac distribution
 //     f(E) = 1 / (1 + exp((E - E_f) / kT))                      [Kittel Ch. 6]
 // =============================================================================
-double PhysicsEngine::fermiDirac(double E) const {
+double PhysicsEngine::fermiDirac(double E) const noexcept {
     const double kT = phys::k_B * m_T;
     const double x  = (E - m_Ef) / kT;
     if (x >  50.0) return 0.0;
@@ -92,17 +92,17 @@ double PhysicsEngine::fermiDirac(double E) const {
 // =============================================================================
 // Ionization fraction  (N_d+/N_d for n-type, N_a-/N_a for p-type).
 // =============================================================================
-double PhysicsEngine::getIonizationFraction() const {
+double PhysicsEngine::getIonizationFraction() const noexcept {
     if (m_dopingType == DopingType::Intrinsic || m_N <= 0.0) return 1.0;
     if (m_dopingType == DopingType::NType) return m_NdPlus  / m_N;
     return                                        m_NaMinus / m_N;
 }
 
-double PhysicsEngine::getResistivity() const {
+double PhysicsEngine::getResistivity() const noexcept {
     return (m_sigma > 0.0) ? 1.0 / m_sigma : std::numeric_limits<double>::infinity();
 }
 
-bool PhysicsEngine::isOpticallyPumped() const {
+bool PhysicsEngine::isOpticallyPumped() const noexcept {
     return m_opticalEnabled && (m_Ephoton > m_Eg);
 }
 
@@ -111,7 +111,7 @@ bool PhysicsEngine::isOpticallyPumped() const {
 // Static helper: photon energy from wavelength
 //     E[eV] = h c / lambda    -> with lambda in nm:  E = 1239.84 / lambda
 // =============================================================================
-double PhysicsEngine::photonEnergyEv(double lambda_nm) {
+double PhysicsEngine::photonEnergyEv(double lambda_nm) noexcept {
     return (lambda_nm > 0.0) ? phys::hc_eVnm / lambda_nm : 0.0;
 }
 
@@ -136,7 +136,7 @@ double PhysicsEngine::photonEnergyEv(double lambda_nm) {
 //   becomes limiting -- this is why doped silicon does not become arbitrarily
 //   conductive at cryogenic temperatures.
 // =============================================================================
-double PhysicsEngine::matthiessenMobilityElectron(double T, double N) {
+double PhysicsEngine::matthiessenMobilityElectron(double T, double N) noexcept {
     const double Tr   = T / 300.0;
     const double mu_L = phys::mu_L_n_300 * std::pow(Tr, -1.5);
 
@@ -148,7 +148,7 @@ double PhysicsEngine::matthiessenMobilityElectron(double T, double N) {
     return 1.0 / (1.0 / mu_L + 1.0 / mu_I);
 }
 
-double PhysicsEngine::matthiessenMobilityHole(double T, double N) {
+double PhysicsEngine::matthiessenMobilityHole(double T, double N) noexcept {
     const double Tr   = T / 300.0;
     const double mu_L = phys::mu_L_p_300 * std::pow(Tr, -1.5);
 
@@ -166,7 +166,7 @@ double PhysicsEngine::matthiessenMobilityHole(double T, double N) {
 //   mu(N,T) = mu_min(T) + (mu_max(T) - mu_min(T)) / (1 + (N/N_ref(T))^alpha)
 //   with T-scaling exponents from the Arora-Hauser-Roulston 1982 paper.
 // =============================================================================
-double PhysicsEngine::aroraMobilityElectron(double T, double N) {
+double PhysicsEngine::aroraMobilityElectron(double T, double N) noexcept {
     const double Tr     = T / 300.0;
     const double mu_min = phys::mu_n_min_300 * std::pow(Tr, -0.57);
     const double mu_max = phys::mu_n_max_300 * std::pow(Tr, -2.33);
@@ -176,7 +176,7 @@ double PhysicsEngine::aroraMobilityElectron(double T, double N) {
     return mu_min + (mu_max - mu_min) / (1.0 + scale);
 }
 
-double PhysicsEngine::aroraMobilityHole(double T, double N) {
+double PhysicsEngine::aroraMobilityHole(double T, double N) noexcept {
     const double Tr     = T / 300.0;
     const double mu_min = phys::mu_p_min_300 * std::pow(Tr, -0.57);
     const double mu_max = phys::mu_p_max_300 * std::pow(Tr, -2.23);
@@ -355,13 +355,13 @@ void PhysicsEngine::computeHall() {
     m_R_H = (p * m_mu_p * m_mu_p - n * m_mu_n * m_mu_n) / denom;
 }
 
-double PhysicsEngine::getHallVoltage(double I_A,
+double PhysicsEngine::getHallVoltage(double current_A,
                                      double thickness_cm,
-                                     double B_T) const
+                                     double field_T) const noexcept
 {
     // V_H = R_H * I * B / t       (Kasap Eq. 2.49)
     if (thickness_cm <= 0.0) return 0.0;
-    return m_R_H * I_A * B_T / thickness_cm;
+    return m_R_H * current_A * field_T / thickness_cm;
 }
 
 
