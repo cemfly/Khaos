@@ -77,18 +77,48 @@ constexpr std::array<std::string_view, 7> kFontCandidates{
     "C:/Windows/Fonts/segoeui.ttf",
 };
 
-[[nodiscard]] bool loadFont(sf::Font& font) {
+// Loads the SFML font (used by SFML render textures: BandView labels) and
+// returns a Windows-style path to the same file so ImGui can load it at a
+// custom size for the dockable UI.
+[[nodiscard]] bool loadFont(sf::Font& font, std::filesystem::path& outPath) {
     for (const auto path : kFontCandidates) {
         const std::filesystem::path fp{path};
         std::error_code ec;
         if (!std::filesystem::exists(fp, ec)) continue;
         if (font.openFromFile(fp)) {
+            outPath = fp;
             std::cout << "[info] Loaded font: " << fp.string() << '\n';
             return true;
         }
     }
     std::cerr << "[warn] No usable font found.\n";
     return false;
+}
+
+
+// Targets a comfortable readable size on 1080p+ displays. The default ImGui
+// font (Proggy at 13 px) is too small for slider readouts; 17 px keeps text
+// legible at standard zoom without crowding the panels.
+inline constexpr float kImGuiFontSizePx = 17.0f;
+
+
+// Loads the same TTF that SFML used into ImGui at a larger point size.
+// Falls back to ImGui's built-in pixel font if no TTF is available.
+void loadImGuiFont(sf::RenderWindow& window,
+                   const std::filesystem::path& fontPath)
+{
+    ImGuiIO& io = ImGui::GetIO();
+    io.Fonts->Clear();
+
+    bool ok = false;
+    if (!fontPath.empty()) {
+        const std::string s = fontPath.string();
+        if (io.Fonts->AddFontFromFileTTF(s.c_str(), kImGuiFontSizePx))
+            ok = true;
+    }
+    if (!ok) io.Fonts->AddFontDefault();
+
+    (void)ImGui::SFML::UpdateFontTexture(window);
 }
 
 
@@ -317,7 +347,7 @@ struct UIState {
     float       sourceIntensity = 1.5f;
     float       sourceSigma     = 0.05f;
 
-    // Phase 6 -- BJT controls
+    // BJT controls
     float       V_BE = 0.0f;
     float       V_CE = 0.0f;
 
@@ -379,7 +409,8 @@ void drawMenuBar(bool& running, UIState& ui, PhysicsEngine& physics,
             ImGui::EndMenu();
         }
         if (ImGui::BeginMenu("Help")) {
-            ImGui::TextDisabled("Phase 6 -- electrothermal solver + NPN BJT");
+            ImGui::TextDisabled("Semiconductor Analysis & Simulation Platform");
+            ImGui::TextDisabled("dex / cemfly-april2026");
             ImGui::EndMenu();
         }
         ImGui::EndMenuBar();
@@ -623,26 +654,26 @@ void drawReadoutsWindow(const PhysicsEngine& physics,
 
     ImGui::SeparatorText("Carriers (total = thermal + optical + drift)");
     row("n",      physics.getTotalElectronConc(),   "%.3e cm^-3",
-        ImVec4(1.0f, 0.9f, 0.3f, 1.0f));
+        ImVec4(0.78f, 0.46f, 0.18f, 1.0f));
     row("p",      physics.getTotalHoleConc(),       "%.3e cm^-3",
-        ImVec4(1.0f, 0.4f, 0.8f, 1.0f));
+        ImVec4(0.55f, 0.20f, 0.65f, 1.0f));
     if (physics.isOpticallyPumped())
         row("dN_opt", physics.getExcessCarrierDensity(), "%.3e cm^-3",
-            ImVec4(0.55f, 0.9f, 1.0f, 1.0f));
+            ImVec4(0.20f, 0.45f, 0.78f, 1.0f));
     row("dN_drift", physics.getDriftDiffusionExcess(), "%.3e cm^-3",
-        ImVec4(1.0f, 0.7f, 0.45f, 1.0f));
+        ImVec4(0.70f, 0.40f, 0.20f, 1.0f));
 
     ImGui::SeparatorText("Transport");
     row("mu_n",   physics.getElectronMobility(),    "%8.1f cm^2/Vs");
     row("mu_p",   physics.getHoleMobility(),        "%8.1f cm^2/Vs");
     row("sigma",  physics.getConductivity(),        "%.3e S/cm",
-        ImVec4(0.55f, 1.0f, 0.7f, 1.0f));
+        ImVec4(0.10f, 0.50f, 0.30f, 1.0f));
     row("rho",    physics.getResistivity(),         "%.3e Ohm.cm");
 
     ImGui::SeparatorText("Magnetic / Hall");
     row("B",      physics.getMagneticField(),       "%8.3f T");
     row("R_H",    physics.getHallCoefficient(),     "%.3e cm^3/C",
-        ImVec4(1.0f, 0.7f, 0.45f, 1.0f));
+        ImVec4(0.78f, 0.42f, 0.18f, 1.0f));
 
     if (physics.getDopingType() != DopingType::Intrinsic) {
         ImGui::SeparatorText("Ionization");
@@ -650,20 +681,34 @@ void drawReadoutsWindow(const PhysicsEngine& physics,
             "%6.2f %%");
     }
 
-    // ---- Phase 6: thermal + BJT readouts -------------------------------
+    // ---- Thermal grid + electrothermal feedback ------------------------
     ImGui::SeparatorText("Thermal grid");
     row("T_avg",  dd.meanTemperature(),       "%8.2f K",
-        ImVec4(0.55f, 0.85f, 1.00f, 1.0f));
+        ImVec4(0.20f, 0.45f, 0.75f, 1.0f));
     row("T_peak", dd.maxTemperature(),        "%8.2f K",
-        ImVec4(1.00f, 0.55f, 0.30f, 1.0f));
+        ImVec4(0.85f, 0.30f, 0.10f, 1.0f));
     row("dT_avg", dd.deltaTaverage(),         "%+8.2f K");
+
+    // Electrothermal feedback readouts: at T_peak the bandgap narrows and
+    // the intrinsic carrier density jumps. Show both side by side with the
+    // ambient values to make the runaway condition visible numerically.
+    if (dd.maxTemperature() > dd.ambientTemperature() + 1.0f) {
+        const auto& mat   = physics.getMaterial();
+        const double T_pk = dd.maxTemperature();
+        const double Eg_pk = PhysicsEngine::bandgapAt(mat, T_pk);
+        const double ni_pk = PhysicsEngine::intrinsicCarrierAt(mat, T_pk);
+        row("E_g(peak)", Eg_pk, "%8.4f eV",
+            ImVec4(0.55f, 0.30f, 0.10f, 1.0f));
+        row("n_i(peak)", ni_pk, "%.3e cm^-3",
+            ImVec4(0.55f, 0.30f, 0.10f, 1.0f));
+    }
 
     if (dd.deviceMode() == DeviceMode::NpnBjt) {
         ImGui::SeparatorText("BJT (NPN)");
         row("V_BE",  dd.vBE(), "%8.3f V");
         row("V_CE",  dd.vCE(), "%8.3f V");
         row("I_C",   dd.collectorCurrent(), "%.3e a.u.",
-            ImVec4(0.60f, 1.00f, 0.80f, 1.0f));
+            ImVec4(0.10f, 0.50f, 0.30f, 1.0f));
     }
 
     ImGui::End();
@@ -869,14 +914,15 @@ void drawIVCurveWindow(const DriftDiffusion& dd) {
     vbe.clear();
     ic .clear();
 
-    constexpr float kT_eV = 0.02585f;
-    const float V_CE = dd.vCE();
+    // Use the actual ambient T so the curve and the simulation agree.
+    const float kT_eV = 8.617333262e-5f * dd.ambientTemperature();
+    const float V_CE  = dd.vCE();
 
     for (int i = 0; i <= kSamples; ++i) {
-        const float v = i * 0.01f;            // 0 .. 1.0 V
+        const float v   = i * 0.01f;          // 0 .. 1.0 V
         const float arg = std::clamp(v / kT_eV, 0.0f, 25.0f);
         const float n_e = 0.6f * std::exp(arg);
-        // Same proxy formula as DriftDiffusion::applyBjtBoundaries.
+        // Mirrors DriftDiffusion::applyBjtBoundaries exactly.
         const float current = n_e * (V_CE * 0.03f);
         vbe.push_back(v);
         ic .push_back(std::max(current, 1.0e-12f));   // floor for log axis
@@ -971,7 +1017,9 @@ int main() {
     applyLightStyle();
 
     sf::Font font;
-    (void)loadFont(font);
+    std::filesystem::path fontPath;
+    (void)loadFont(font, fontPath);
+    loadImGuiFont(window, fontPath);
 
     auto physics = std::make_unique<PhysicsEngine>(material::Kind::Silicon);
     auto dd      = std::make_unique<DriftDiffusion>(60, 40);

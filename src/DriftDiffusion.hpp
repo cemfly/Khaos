@@ -6,8 +6,7 @@
 //   Author : dex / cemfly-april2026
 //   License: MIT
 // -----------------------------------------------------------------------------
-// What started in Phase 7 of the SFML era as a single carrier-diffusion grid
-// now hosts three coupled fields plus a region map:
+// Three coupled scalar fields plus a region map share one grid:
 //
 //      +-------------------------------------------------------------+
 //      |  n(x,y)  : excess minority-carrier density   [a.u.]         |

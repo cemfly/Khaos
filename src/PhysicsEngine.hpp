@@ -147,11 +147,20 @@ public:
     // ---- CSV export --------------------------------------------------------
     [[nodiscard]] bool exportCSV(const std::string& path) const;
 
-    // ---- Static mobility helpers (parameterized by material) --------------
+    // ---- Static helpers (parameterized by material; testable directly) ----
+    [[nodiscard]] static double bandgapAt(
+        const material::Profile& mat, double T) noexcept;
+    [[nodiscard]] static double intrinsicCarrierAt(
+        const material::Profile& mat, double T) noexcept;
+
+    // The N argument is the *ionized* impurity concentration -- which is
+    // what actually scatters carriers. At freeze-out (low T) this is much
+    // smaller than the dopant concentration, and the resulting mobility is
+    // correspondingly higher.
     [[nodiscard]] static double matthiessenMobilityElectron(
-        const material::Profile& mat, double T, double N) noexcept;
+        const material::Profile& mat, double T, double N_ionized) noexcept;
     [[nodiscard]] static double matthiessenMobilityHole(
-        const material::Profile& mat, double T, double N) noexcept;
+        const material::Profile& mat, double T, double N_ionized) noexcept;
     [[nodiscard]] static double aroraMobilityElectron(double T, double N) noexcept;
     [[nodiscard]] static double aroraMobilityHole    (double T, double N) noexcept;
 

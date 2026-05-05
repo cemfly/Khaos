@@ -112,6 +112,30 @@ double PhysicsEngine::photonEnergyEv(double lambda_nm) noexcept {
 
 
 // =============================================================================
+// Static T-evaluators (used by per-cell electrothermal feedback and tests).
+//
+//   bandgapAt(mat, T)      = E_g(T)  via Varshni for `mat`
+//   intrinsicCarrierAt     = sqrt(Nc(T) * Nv(T)) * exp(-E_g(T) / 2kT)
+// =============================================================================
+double PhysicsEngine::bandgapAt(const material::Profile& mat, double T) noexcept {
+    if (T < 1.0) T = 1.0;
+    return mat.Eg0 - (mat.varshni_a * T * T) / (T + mat.varshni_b);
+}
+
+double PhysicsEngine::intrinsicCarrierAt(const material::Profile& mat,
+                                         double T) noexcept
+{
+    if (T < 1.0) T = 1.0;
+    const double Eg    = bandgapAt(mat, T);
+    const double T_3_2 = std::pow(T / 300.0, 1.5);
+    const double Nc    = mat.Nc_300K * T_3_2;
+    const double Nv    = mat.Nv_300K * T_3_2;
+    const double kT    = phys::k_B * T;
+    return std::sqrt(Nc * Nv) * std::exp(-Eg / (2.0 * kT));
+}
+
+
+// =============================================================================
 // Matthiessen mobility (parameterized by Material)
 // =============================================================================
 double PhysicsEngine::matthiessenMobilityElectron(
@@ -275,12 +299,23 @@ void PhysicsEngine::computeOptical() {
 
 
 // =============================================================================
-// Transport: pick model, compute mobility + sigma
+// Transport: pick model, compute mobility + sigma.
+//
+// The Matthiessen impurity term scatters carriers off *ionized* impurities,
+// so freeze-out (where N_ionized << N_d) should *increase* mobility -- and
+// this fall-through here makes that happen in the simulator. The Arora model
+// is left unchanged (it was empirically fitted on full-ionization data and
+// has its own embedded T scaling).
 // =============================================================================
 void PhysicsEngine::computeTransport() {
     if (m_mobilityModel == MobilityModel::Matthiessen) {
-        m_mu_n = matthiessenMobilityElectron(*m_material, m_T, m_N);
-        m_mu_p = matthiessenMobilityHole    (*m_material, m_T, m_N);
+        // Choose the relevant ionized impurity count for the current state.
+        double N_scat = m_N;       // default = full ionization
+        if (m_dopingType == DopingType::NType)      N_scat = m_NdPlus;
+        else if (m_dopingType == DopingType::PType) N_scat = m_NaMinus;
+        else                                         N_scat = 0.0;
+        m_mu_n = matthiessenMobilityElectron(*m_material, m_T, N_scat);
+        m_mu_p = matthiessenMobilityHole    (*m_material, m_T, N_scat);
     } else {
         m_mu_n = aroraMobilityElectron(m_T, m_N);
         m_mu_p = aroraMobilityHole    (m_T, m_N);
@@ -315,16 +350,12 @@ double PhysicsEngine::getHallVoltage(double current_A,
 // Master update
 // =============================================================================
 void PhysicsEngine::recompute() {
-    // Bandgap (Varshni, parameterized by material).
-    m_Eg = m_material->Eg0
-         - (m_material->varshni_a * m_T * m_T) / (m_T + m_material->varshni_b);
-
+    // Band structure (Varshni + T^(3/2) DOS scaling).
+    m_Eg = bandgapAt(*m_material, m_T);
     const double T_3_2 = std::pow(m_T / 300.0, 1.5);
     m_Nc = m_material->Nc_300K * T_3_2;
     m_Nv = m_material->Nv_300K * T_3_2;
-
-    const double kT = phys::k_B * m_T;
-    m_ni = std::sqrt(m_Nc * m_Nv) * std::exp(-m_Eg / (2.0 * kT));
+    m_ni = intrinsicCarrierAt(*m_material, m_T);
 
     if (m_incompleteIonization && m_dopingType != DopingType::Intrinsic)
         solveIncompleteIonization();

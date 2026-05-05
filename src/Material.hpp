@@ -76,7 +76,7 @@ struct Profile {
     //   under above-gap illumination is visually obvious next to Si.
     double K_opt_excess; // pedagogical pre-factor
 
-    // ---- Thermal (Phase 6: 2D heat-equation solver) -----------------------
+    // ---- Thermal (2D heat-equation solver) --------------------------------
     //
     //   Fourier's law of heat conduction:
     //

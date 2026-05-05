@@ -54,7 +54,7 @@ void DriftDiffusion::configureForMaterial(const material::Profile& mat) {
 
 
 // =============================================================================
-// Source helpers (unchanged from Phase 5)
+// Source helpers
 // =============================================================================
 void DriftDiffusion::addSource(float u, float v, float intensity, float sigma) {
     u = std::clamp(u, 0.0f, 1.0f);
@@ -190,8 +190,11 @@ void DriftDiffusion::stepCarriers(float dt) {
 // across the collector boundary -- a proxy for sweep-out rate.
 // =============================================================================
 void DriftDiffusion::applyBjtBoundaries() {
-    constexpr float k_B_T_300 = 0.02585f;     // kT at 300 K [eV]
-    const float thermalArg = std::clamp(m_VBE / k_B_T_300, 0.0f, 25.0f);
+    // kT at the *current* ambient temperature -- so the V_BE response is
+    // properly temperature-dependent (cold devices need more V_BE for the
+    // same injection level; hot devices saturate faster).
+    const float kT_eV      = 8.617333262e-5f * m_T_ambient;
+    const float thermalArg = std::clamp(m_VBE / kT_eV, 0.0f, 25.0f);
     const float n_emitter  = 0.6f * std::exp(thermalArg);
     // n_emitter capped because the visualisation grid is unitless; full
     // exp(40) would saturate immediately and hide structure. The clamp
