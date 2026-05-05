@@ -34,6 +34,9 @@ const Profile Silicon{
 
     .K_opt_excess      = 1.0e15,
 
+    .kappa             = 1.50,       // W/(cm K)
+    .rho_cp            = 1.65,       // J/(cm^3 K)
+
     .atomR = 120, .atomG = 170, .atomB = 220,
 };
 
@@ -71,6 +74,9 @@ const Profile GalliumArsenide{
     // Direct-gap absorption is much stronger -> bigger K_opt.
     .K_opt_excess      = 1.0e16,
 
+    .kappa             = 0.55,       // GaAs: ~3x lower than Si
+    .rho_cp            = 1.74,
+
     .atomR = 200, .atomG = 130, .atomB = 240,
 };
 
@@ -104,6 +110,9 @@ const Profile Germanium{
     .N_ref_matt        = 1.0e17,
 
     .K_opt_excess      = 5.0e15,
+
+    .kappa             = 0.60,
+    .rho_cp            = 1.65,
 
     .atomR = 230, .atomG = 160, .atomB =  90,
 };

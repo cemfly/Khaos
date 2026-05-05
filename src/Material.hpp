@@ -73,6 +73,25 @@ struct Profile {
     //   under above-gap illumination is visually obvious next to Si.
     double K_opt_excess; // pedagogical pre-factor
 
+    // ---- Thermal (Phase 6: 2D heat-equation solver) -----------------------
+    //
+    //   Fourier's law of heat conduction:
+    //
+    //       rho Cp  d T / d t  =  div(kappa grad T) + H_gen(x, y)
+    //
+    //   On the visualisation grid (dimensionless cells), this collapses to
+    //   an FTCS update governed by the diffusivity  alpha = kappa / (rho Cp).
+    //
+    //   Values are intentionally given in CGS-cm units for consistency with
+    //   the rest of the engine (cm, eV, S/cm, ...). The numerical solver
+    //   rescales them onto a per-frame coefficient internally.
+    //
+    //   Si:    kappa ~ 1.5  W/(cm K),  rho_cp ~ 1.65 J/(cm^3 K)
+    //   GaAs:  kappa ~ 0.55,           rho_cp ~ 1.74
+    //   Ge:    kappa ~ 0.6,            rho_cp ~ 1.65
+    double kappa;        // [W / (cm K)]   thermal conductivity at 300 K
+    double rho_cp;       // [J / (cm^3 K)] volumetric heat capacity
+
     // ---- Display ----------------------------------------------------------
     // Atom rendering colour (Si-blue, GaAs-purple, Ge-orange). Stored as raw
     // RGB bytes so this header has zero SFML dependency.

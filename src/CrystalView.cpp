@@ -19,12 +19,10 @@ CrystalView::CrystalView(unsigned int textureSize)
     , m_rng(std::random_device{}())
 {
     if (!m_rt.resize({textureSize, textureSize})) {
-        // SFML 3 returns false on failure; the texture stays unusable.
-        // Caller code must check renderTexture().getSize() before drawing.
+        // Texture creation failed; renderTexture().getSize() will be {0,0}.
     }
     m_rt.setSmooth(true);
 
-    // Lay out atoms on the grid (purely geometric -- type assigned in rebuild).
     m_atoms.reserve(static_cast<std::size_t>(m_rows * m_cols));
     for (int r = 0; r < m_rows; ++r) {
         for (int c = 0; c < m_cols; ++c) {
@@ -52,7 +50,7 @@ int CrystalView::targetCarrierCount(double concentration) const noexcept {
 
 
 // =============================================================================
-// Rebuild: re-roll dopants and carriers based on the current physics state
+// Rebuild atoms + carriers
 // =============================================================================
 void CrystalView::rebuild(const PhysicsEngine& physics) {
     for (auto& a : m_atoms) a.type = AtomType::Host;
@@ -108,7 +106,7 @@ void CrystalView::resampleCarriers(const PhysicsEngine& physics) {
 
 
 // =============================================================================
-// Per-frame update -- random walk + Lorentz rotation
+// Per-frame carrier update
 // =============================================================================
 void CrystalView::update(float dt, const PhysicsEngine& physics) {
     std::uniform_real_distribution<float> kick(-40.f, 40.f);
@@ -150,14 +148,9 @@ void CrystalView::update(float dt, const PhysicsEngine& physics) {
 
 
 // =============================================================================
-// Heatmap of n(x, y) from DriftDiffusion
-//
-//   Each grid cell becomes a small filled rectangle whose colour is read
-//   from the viridis-ish palette at t = n(i,j) / max(n).  The whole grid
-//   is overlaid with ~50% alpha so the lattice + carriers stay visible
-//   underneath.
+// Carrier heatmap (n(x,y) from DriftDiffusion grid)
 // =============================================================================
-void CrystalView::drawHeatmap(const DriftDiffusion& dd) {
+void CrystalView::drawCarrierHeatmap(const DriftDiffusion& dd) {
     const float maxv = std::max(dd.maxValue(), 1.0e-3f);
     const int   W    = dd.width();
     const int   H    = dd.height();
@@ -193,10 +186,109 @@ void CrystalView::drawHeatmap(const DriftDiffusion& dd) {
 
 
 // =============================================================================
+// Thermal heatmap (T(x,y))
+//
+// Mapping:  300 K (ambient)  ->  blue
+//           600 K            ->  yellow / orange
+//           >900 K           ->  red / white-hot (thermal runaway)
+// =============================================================================
+void CrystalView::drawThermalHeatmap(const DriftDiffusion& dd) {
+    const float Tmin = 300.0f;
+    const float Tmax = std::max(dd.maxTemperature(), Tmin + 1.0f);
+    const float Tspan = std::max(Tmax - Tmin, 1.0f);
+
+    const int   W = dd.width();
+    const int   H = dd.height();
+    const float cw = m_size.x / static_cast<float>(W);
+    const float ch = m_size.y / static_cast<float>(H);
+
+    sf::VertexArray quads(sf::PrimitiveType::Triangles);
+    quads.resize(static_cast<std::size_t>(W * H * 6));
+
+    std::size_t v = 0;
+    for (int j = 0; j < H; ++j) {
+        for (int i = 0; i < W; ++i) {
+            const float T  = dd.temperatureAt(i, j);
+            const float t  = std::clamp((T - Tmin) / Tspan, 0.0f, 1.0f);
+            sf::Color c    = palette::thermalColor(t);
+            // Stronger alpha than carrier heatmap so hot regions glow
+            // visibly through the lattice.
+            c.a            = static_cast<std::uint8_t>(60.0f + 140.0f * t);
+
+            const float x0 = m_topLeft.x + i * cw;
+            const float y0 = m_topLeft.y + j * ch;
+            const float x1 = x0 + cw;
+            const float y1 = y0 + ch;
+
+            quads[v++] = sf::Vertex{{x0, y0}, c};
+            quads[v++] = sf::Vertex{{x1, y0}, c};
+            quads[v++] = sf::Vertex{{x1, y1}, c};
+            quads[v++] = sf::Vertex{{x0, y0}, c};
+            quads[v++] = sf::Vertex{{x1, y1}, c};
+            quads[v++] = sf::Vertex{{x0, y1}, c};
+        }
+    }
+    m_rt.draw(quads);
+}
+
+
+// =============================================================================
+// BJT region overlay (Emitter / Base / Collector)
+// =============================================================================
+void CrystalView::drawBjtRegions(const DriftDiffusion& dd) {
+    if (dd.deviceMode() != DeviceMode::NpnBjt) return;
+
+    const int   W  = dd.width();
+    const int   H  = dd.height();
+    const float cw = m_size.x / static_cast<float>(W);
+    const float ch = m_size.y / static_cast<float>(H);
+
+    sf::VertexArray quads(sf::PrimitiveType::Triangles);
+    quads.resize(static_cast<std::size_t>(W * H * 6));
+
+    std::size_t v = 0;
+    for (int j = 0; j < H; ++j) {
+        for (int i = 0; i < W; ++i) {
+            const auto r = dd.regionAt(i, j);
+            sf::Color c{0, 0, 0, 0};
+            switch (r) {
+                case CellRegion::Emitter:
+                    c = sf::Color(80, 180, 255,  60);  // blue tint
+                    break;
+                case CellRegion::Base:
+                    c = sf::Color(255, 130, 130,  90); // pink tint -- the
+                                                       // narrow active region
+                    break;
+                case CellRegion::Collector:
+                    c = sf::Color(140, 255, 180,  50); // green tint
+                    break;
+                case CellRegion::Bulk:
+                default:
+                    continue;
+            }
+
+            const float x0 = m_topLeft.x + i * cw;
+            const float y0 = m_topLeft.y + j * ch;
+            const float x1 = x0 + cw;
+            const float y1 = y0 + ch;
+
+            quads[v++] = sf::Vertex{{x0, y0}, c};
+            quads[v++] = sf::Vertex{{x1, y0}, c};
+            quads[v++] = sf::Vertex{{x1, y1}, c};
+            quads[v++] = sf::Vertex{{x0, y0}, c};
+            quads[v++] = sf::Vertex{{x1, y1}, c};
+            quads[v++] = sf::Vertex{{x0, y1}, c};
+        }
+    }
+    quads.resize(v);
+    m_rt.draw(quads);
+}
+
+
+// =============================================================================
 // Lattice (atoms + bonds)
 // =============================================================================
 void CrystalView::drawLattice(const PhysicsEngine& physics) {
-    // Bonds
     sf::VertexArray bonds(sf::PrimitiveType::Lines);
     for (int r = 0; r < m_rows; ++r) {
         for (int c = 0; c < m_cols; ++c) {
@@ -216,7 +308,6 @@ void CrystalView::drawLattice(const PhysicsEngine& physics) {
     }
     m_rt.draw(bonds);
 
-    // Atoms
     const auto& mat = physics.getMaterial();
     const sf::Color hostCol(mat.atomR, mat.atomG, mat.atomB);
 
@@ -248,7 +339,7 @@ void CrystalView::drawLattice(const PhysicsEngine& physics) {
 
 
 // =============================================================================
-// Carriers (electrons + holes, thermal vs optical)
+// Carriers
 // =============================================================================
 void CrystalView::drawCarriers() {
     sf::CircleShape dot(3.f);
@@ -272,22 +363,13 @@ void CrystalView::drawCarriers() {
 
 
 // =============================================================================
-// Lorentz deflection vector field
-//
-//   For a hypothetical electron with horizontal velocity v_x > 0 and a
-//   perpendicular field B_z, the Lorentz force is
-//
-//       F  =  -e (v x B)  =  (0, -e v_x B_z, 0)
-//
-//   We draw an arrow at every grid node pointing in that y-direction with
-//   length proportional to |B|. This is the visual signature of the Hall
-//   deflection.
+// Lorentz vector field
 // =============================================================================
 void CrystalView::drawVectorField(const PhysicsEngine& physics) {
     const float B = static_cast<float>(physics.getMagneticField());
     if (std::abs(B) < 1.0e-6f) return;
 
-    constexpr int   step       = 60;            // pixel spacing between glyphs
+    constexpr int   step       = 60;
     const float     maxLen     = step * 0.45f;
     const float     normalised = std::min(std::abs(B) / 10.0f, 1.0f);
     const float     len        = maxLen * normalised;
@@ -305,7 +387,6 @@ void CrystalView::drawVectorField(const PhysicsEngine& physics) {
             lines.append(sf::Vertex{{x0, y0},   col});
             lines.append(sf::Vertex{{x0, yEnd}, col});
 
-            // Arrow head
             lines.append(sf::Vertex{{x0,        yEnd},                 col});
             lines.append(sf::Vertex{{x0 - 4.f, yEnd - sign * 6.f},     col});
             lines.append(sf::Vertex{{x0,        yEnd},                 col});
@@ -321,14 +402,21 @@ void CrystalView::drawVectorField(const PhysicsEngine& physics) {
 // =============================================================================
 void CrystalView::render(const PhysicsEngine&  physics,
                          const DriftDiffusion& dd,
-                         bool                  showHeatmap,
+                         HeatmapMode           heatmapMode,
                          bool                  showVectorField)
 {
     m_rt.clear(palette::ViewBg);
 
-    if (showHeatmap)     drawHeatmap(dd);
-                          drawLattice(physics);
-                          drawCarriers();
+    switch (heatmapMode) {
+        case HeatmapMode::Carriers: drawCarrierHeatmap(dd); break;
+        case HeatmapMode::Thermal:  drawThermalHeatmap(dd); break;
+        case HeatmapMode::None:
+        default: break;
+    }
+
+    drawBjtRegions(dd);
+    drawLattice(physics);
+    drawCarriers();
     if (showVectorField) drawVectorField(physics);
 
     m_rt.display();

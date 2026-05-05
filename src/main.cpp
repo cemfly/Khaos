@@ -24,6 +24,7 @@
 
 #include <imgui.h>
 #include <imgui-SFML.h>
+#include <imgui_internal.h>      // DockBuilder API for the fixed layout
 #include <implot.h>
 
 #include <algorithm>
@@ -100,17 +101,131 @@ void enableImGuiDocking() {
 void applyDarkStyle() {
     ImGui::StyleColorsDark();
     ImGuiStyle& s = ImGui::GetStyle();
-    s.WindowRounding   = 6.0f;
-    s.FrameRounding    = 4.0f;
-    s.GrabRounding     = 4.0f;
-    s.PopupRounding    = 4.0f;
-    s.WindowBorderSize = 1.0f;
-    s.FrameBorderSize  = 0.0f;
-    s.ItemSpacing      = ImVec2(8.0f, 6.0f);
-    s.WindowPadding    = ImVec2(10.0f, 10.0f);
+
+    // Roundings -- a touch of softness, still industrial.
+    s.WindowRounding    = 6.0f;
+    s.ChildRounding     = 4.0f;
+    s.FrameRounding     = 4.0f;
+    s.GrabRounding      = 4.0f;
+    s.PopupRounding     = 4.0f;
+    s.TabRounding       = 4.0f;
+
+    // Borders for clean panel separation.
+    s.WindowBorderSize  = 1.0f;
+    s.ChildBorderSize   = 1.0f;
+    s.FrameBorderSize   = 0.0f;
+    s.PopupBorderSize   = 1.0f;
+
+    // Generous spacing -- "breathing room" the user explicitly asked for.
+    s.WindowPadding     = ImVec2(12.0f, 12.0f);
+    s.FramePadding      = ImVec2( 8.0f,  5.0f);
+    s.CellPadding       = ImVec2( 6.0f,  4.0f);
+    s.ItemSpacing       = ImVec2(10.0f,  8.0f);
+    s.ItemInnerSpacing  = ImVec2( 6.0f,  6.0f);
+    s.IndentSpacing     = 22.0f;
+    s.ScrollbarSize     = 14.0f;
+    s.GrabMinSize       = 12.0f;
+
+    // Slightly tighter colour scheme: deeper background, brighter accents.
+    ImVec4* c = s.Colors;
+    c[ImGuiCol_WindowBg]        = ImVec4(0.10f, 0.11f, 0.14f, 1.00f);
+    c[ImGuiCol_ChildBg]         = ImVec4(0.07f, 0.08f, 0.10f, 1.00f);
+    c[ImGuiCol_PopupBg]         = ImVec4(0.10f, 0.11f, 0.14f, 0.96f);
+    c[ImGuiCol_Border]          = ImVec4(0.32f, 0.36f, 0.42f, 0.50f);
+    c[ImGuiCol_FrameBg]         = ImVec4(0.16f, 0.18f, 0.22f, 1.00f);
+    c[ImGuiCol_FrameBgHovered]  = ImVec4(0.22f, 0.26f, 0.32f, 1.00f);
+    c[ImGuiCol_FrameBgActive]   = ImVec4(0.28f, 0.34f, 0.42f, 1.00f);
+    c[ImGuiCol_TitleBg]         = ImVec4(0.10f, 0.12f, 0.16f, 1.00f);
+    c[ImGuiCol_TitleBgActive]   = ImVec4(0.18f, 0.24f, 0.34f, 1.00f);
+    c[ImGuiCol_Header]          = ImVec4(0.20f, 0.30f, 0.42f, 0.65f);
+    c[ImGuiCol_HeaderHovered]   = ImVec4(0.25f, 0.40f, 0.55f, 0.85f);
+    c[ImGuiCol_HeaderActive]    = ImVec4(0.30f, 0.50f, 0.70f, 1.00f);
+    c[ImGuiCol_Tab]             = ImVec4(0.13f, 0.16f, 0.22f, 1.00f);
+    c[ImGuiCol_TabHovered]      = ImVec4(0.30f, 0.45f, 0.60f, 1.00f);
+    c[ImGuiCol_TabActive]       = ImVec4(0.20f, 0.35f, 0.50f, 1.00f);
+    c[ImGuiCol_DockingPreview]  = ImVec4(0.40f, 0.60f, 0.95f, 0.50f);
+    c[ImGuiCol_Separator]       = ImVec4(0.35f, 0.40f, 0.48f, 0.60f);
+    c[ImGuiCol_SliderGrab]      = ImVec4(0.85f, 0.80f, 0.30f, 1.00f);
+    c[ImGuiCol_SliderGrabActive]= ImVec4(1.00f, 0.92f, 0.40f, 1.00f);
 }
 
-void beginDockspaceHost() {
+
+// =============================================================================
+// HelpMarker -- the standard ImGui "(?)" hover tooltip pattern.
+//
+// Replaces the wall-of-text TextWrapped() blocks that used to sit inside
+// each panel. Now every formula / explanation is opt-in: the user only sees
+// it if they hover the icon.
+// =============================================================================
+void HelpMarker(const char* desc) {
+    ImGui::SameLine();
+    ImGui::TextDisabled("(?)");
+    if (ImGui::BeginItemTooltip()) {
+        ImGui::PushTextWrapPos(ImGui::GetFontSize() * 32.0f);
+        ImGui::TextUnformatted(desc);
+        ImGui::PopTextWrapPos();
+        ImGui::EndTooltip();
+    }
+}
+
+
+// =============================================================================
+// Initial dock layout -- 3-column IDE arrangement.
+//
+//   Left  25%  : Controls (single tall panel)
+//   Centre 50% : top -> Crystal View, bottom -> [Live Osc | Spectrum | I-V] tabs
+//   Right 25%  : top -> Band Diagram,  bottom -> [Readouts | Crystal Info] tabs
+//
+// Called only when no layout exists yet (first launch) or when the user picks
+// "View -> Reset layout".
+// =============================================================================
+void setupInitialDockLayout(ImGuiID dockspace_id, ImVec2 size) {
+    ImGui::DockBuilderRemoveNode(dockspace_id);
+    ImGui::DockBuilderAddNode(dockspace_id, ImGuiDockNodeFlags_DockSpace);
+    ImGui::DockBuilderSetNodeSize(dockspace_id, size);
+
+    ImGuiID dock_main = dockspace_id;
+
+    // 1) Carve off the left 25% for Controls.
+    const ImGuiID dock_left =
+        ImGui::DockBuilderSplitNode(dock_main, ImGuiDir_Left,
+                                    0.25f, nullptr, &dock_main);
+
+    // 2) Carve off the right column (1/3 of the remaining 75% = 25% total).
+    ImGuiID dock_right =
+        ImGui::DockBuilderSplitNode(dock_main, ImGuiDir_Right,
+                                    0.333f, nullptr, &dock_main);
+
+    // 3) Split the centre column 60% top / 40% bottom.
+    const ImGuiID dock_center_bottom =
+        ImGui::DockBuilderSplitNode(dock_main, ImGuiDir_Down,
+                                    0.40f, nullptr, &dock_main);
+    const ImGuiID dock_center_top = dock_main;
+
+    // 4) Split the right column 50% top / 50% bottom.
+    const ImGuiID dock_right_bottom =
+        ImGui::DockBuilderSplitNode(dock_right, ImGuiDir_Down,
+                                    0.50f, nullptr, &dock_right);
+    const ImGuiID dock_right_top = dock_right;
+
+    // 5) Dock every named window into its slot.  Multiple windows in the
+    //    same slot become tabs automatically.
+    ImGui::DockBuilderDockWindow("Controls",          dock_left);
+    ImGui::DockBuilderDockWindow("Crystal View",      dock_center_top);
+    ImGui::DockBuilderDockWindow("Live Oscilloscope", dock_center_bottom);
+    ImGui::DockBuilderDockWindow("Spectrum",          dock_center_bottom);
+    ImGui::DockBuilderDockWindow("I-V Curve",         dock_center_bottom);
+    ImGui::DockBuilderDockWindow("Band Diagram",      dock_right_top);
+    ImGui::DockBuilderDockWindow("Readouts",          dock_right_bottom);
+    ImGui::DockBuilderDockWindow("Crystal Info",      dock_right_bottom);
+
+    ImGui::DockBuilderFinish(dockspace_id);
+}
+
+// Returns the dockspace id so the caller (menu code) can request a layout
+// rebuild. The first frame builds the default 3-column layout if no saved
+// layout exists.
+ImGuiID beginDockspaceHost(bool& requestResetLayout) {
     constexpr ImGuiWindowFlags hostFlags =
           ImGuiWindowFlags_NoTitleBar
         | ImGuiWindowFlags_NoCollapse
@@ -132,9 +247,20 @@ void beginDockspaceHost() {
     ImGui::Begin("##DockHost", nullptr, hostFlags);
     ImGui::PopStyleVar(3);
 
-    ImGui::DockSpace(ImGui::GetID("MainDockSpace"),
-                     ImVec2(0.0f, 0.0f),
-                     ImGuiDockNodeFlags_PassthruCentralNode);
+    const ImGuiID dockspace_id = ImGui::GetID("MainDockSpace");
+
+    // First-run layout build, or explicit reset via menu.
+    if (requestResetLayout
+        || ImGui::DockBuilderGetNode(dockspace_id) == nullptr)
+    {
+        setupInitialDockLayout(dockspace_id, viewport->WorkSize);
+        requestResetLayout = false;
+    }
+
+    ImGui::DockSpace(dockspace_id, ImVec2(0.0f, 0.0f),
+                     ImGuiDockNodeFlags_None);
+
+    return dockspace_id;
 }
 
 
@@ -142,11 +268,16 @@ void beginDockspaceHost() {
 // UI state shared across windows
 // =============================================================================
 struct UIState {
-    bool showHeatmap     = true;
-    bool showVectorField = true;
-    bool ddInteractive   = true;     // click in CrystalView -> add source
-    float sourceIntensity = 1.5f;
-    float sourceSigma     = 0.05f;
+    HeatmapMode heatmapMode    = HeatmapMode::Carriers;
+    bool        showVectorField = true;
+    bool        ddInteractive   = true;     // click adds drift-diffusion source
+    float       sourceIntensity = 1.5f;
+    float       sourceSigma     = 0.05f;
+
+    // Phase 6 -- BJT controls
+    float       V_BE = 0.0f;
+    float       V_CE = 0.0f;
+
     std::string statusMessage;
     sf::Clock   statusClock;
     float       statusLifetime = 0.0f;
@@ -178,18 +309,29 @@ void drawMenuBar(bool& running, UIState& ui, PhysicsEngine& physics,
             ImGui::EndMenu();
         }
         if (ImGui::BeginMenu("View")) {
-            ImGui::MenuItem("Heatmap (n(x,y))",   nullptr, &ui.showHeatmap);
-            ImGui::MenuItem("Lorentz vectors",     nullptr, &ui.showVectorField);
-            ImGui::MenuItem("Click adds source",   nullptr, &ui.ddInteractive);
-            if (ImGui::MenuItem("Clear sources")) {
+            if (ImGui::BeginMenu("Heatmap")) {
+                bool h_none = ui.heatmapMode == HeatmapMode::None;
+                bool h_n    = ui.heatmapMode == HeatmapMode::Carriers;
+                bool h_T    = ui.heatmapMode == HeatmapMode::Thermal;
+                if (ImGui::MenuItem("Off",            nullptr, &h_none))
+                    ui.heatmapMode = HeatmapMode::None;
+                if (ImGui::MenuItem("Carriers n(x,y)",nullptr, &h_n))
+                    ui.heatmapMode = HeatmapMode::Carriers;
+                if (ImGui::MenuItem("Thermal T(x,y)", nullptr, &h_T))
+                    ui.heatmapMode = HeatmapMode::Thermal;
+                ImGui::EndMenu();
+            }
+            ImGui::MenuItem("Lorentz vectors",   nullptr, &ui.showVectorField);
+            ImGui::MenuItem("Click adds source", nullptr, &ui.ddInteractive);
+            if (ImGui::MenuItem("Clear sources / reset thermal")) {
                 dd.clear();
                 physics.setDriftDiffusionExcess(0.0);
-                ui.flashStatus("Drift-diffusion grid cleared");
+                ui.flashStatus("Drift-diffusion + thermal grid cleared");
             }
             ImGui::EndMenu();
         }
         if (ImGui::BeginMenu("Help")) {
-            ImGui::TextDisabled("Phase 7 -- ImGui/ImPlot/Material/DriftDiffusion");
+            ImGui::TextDisabled("Phase 6 -- electrothermal solver + NPN BJT");
             ImGui::EndMenu();
         }
         ImGui::EndMenuBar();
@@ -222,10 +364,8 @@ void drawControlsWindow(PhysicsEngine& physics,
                          material::kLabels, material::kCount))
         {
             physics.setMaterial(static_cast<material::Kind>(current));
-            // Re-tune drift-diffusion integrator for the new material.
-            const auto& m = physics.getMaterial();
-            const double D_scale = (m.mu_L_n_300 / 1414.0);  // Si baseline
-            dd.configureForMaterial(D_scale, 1.6);
+            // Re-tune drift-diffusion + thermal integrator for the new material.
+            dd.configureForMaterial(physics.getMaterial());
         }
         const auto& m = physics.getMaterial();
         ImGui::TextDisabled(
@@ -300,12 +440,43 @@ void drawControlsWindow(PhysicsEngine& physics,
     }
 
     ImGui::Separator();
-    ImGui::Checkbox("Show heatmap (n(x,y))",  &ui.showHeatmap);
+
+    // ---- Device mode (Phase 6) -------------------------------------------
+    {
+        const char* devLabels[] = { "Bulk wafer", "NPN BJT" };
+        int dev = static_cast<int>(dd.deviceMode());
+        if (ImGui::Combo("Device mode", &dev, devLabels, IM_ARRAYSIZE(devLabels))) {
+            dd.setDeviceMode(static_cast<DeviceMode>(dev));
+        }
+    }
+    if (dd.deviceMode() == DeviceMode::NpnBjt) {
+        if (ImGui::SliderFloat("V_BE [V]", &ui.V_BE, 0.0f, 1.0f, "%.3f")) {
+            dd.setBjtVoltages(ui.V_BE, ui.V_CE);
+        }
+        if (ImGui::SliderFloat("V_CE [V]", &ui.V_CE, 0.0f, 5.0f, "%.2f")) {
+            dd.setBjtVoltages(ui.V_BE, ui.V_CE);
+        }
+        ImGui::TextDisabled(
+            "Forward biasing V_BE injects electrons from the emitter; V_CE "
+            "sweeps them through the base into the collector. I_C = %.3f a.u.",
+            dd.collectorCurrent());
+    }
+
+    ImGui::Separator();
+
+    // ---- Heatmap mode (3-way picker) -------------------------------------
+    {
+        const char* hLabels[] = { "Off", "Carriers n(x,y)", "Thermal T(x,y)" };
+        int hm = static_cast<int>(ui.heatmapMode);
+        if (ImGui::Combo("Heatmap layer", &hm, hLabels, IM_ARRAYSIZE(hLabels))) {
+            ui.heatmapMode = static_cast<HeatmapMode>(hm);
+        }
+    }
     ImGui::Checkbox("Show Lorentz vectors",   &ui.showVectorField);
     ImGui::Checkbox("Click adds drift-diffusion source", &ui.ddInteractive);
     ImGui::SliderFloat("Source intensity",    &ui.sourceIntensity, 0.1f, 5.0f);
     ImGui::SliderFloat("Source size",         &ui.sourceSigma,     0.02f, 0.20f);
-    if (ImGui::Button("Clear drift-diffusion sources")) {
+    if (ImGui::Button("Clear sources / reset thermal")) {
         dd.clear();
         physics.setDriftDiffusionExcess(0.0);
     }
@@ -317,7 +488,8 @@ void drawControlsWindow(PhysicsEngine& physics,
 // =============================================================================
 // Readouts window
 // =============================================================================
-void drawReadoutsWindow(const PhysicsEngine& physics) {
+void drawReadoutsWindow(const PhysicsEngine& physics,
+                        const DriftDiffusion& dd) {
     if (!ImGui::Begin("Readouts")) { ImGui::End(); return; }
 
     auto row = [](const char* label, double v, const char* fmt,
@@ -365,6 +537,22 @@ void drawReadoutsWindow(const PhysicsEngine& physics) {
         ImGui::SeparatorText("Ionization");
         row("Ion%",  physics.getIonizationFraction() * 100.0,
             "%6.2f %%");
+    }
+
+    // ---- Phase 6: thermal + BJT readouts -------------------------------
+    ImGui::SeparatorText("Thermal grid");
+    row("T_avg",  dd.meanTemperature(),       "%8.2f K",
+        ImVec4(0.55f, 0.85f, 1.00f, 1.0f));
+    row("T_peak", dd.maxTemperature(),        "%8.2f K",
+        ImVec4(1.00f, 0.55f, 0.30f, 1.0f));
+    row("dT_avg", dd.deltaTaverage(),         "%+8.2f K");
+
+    if (dd.deviceMode() == DeviceMode::NpnBjt) {
+        ImGui::SeparatorText("BJT (NPN)");
+        row("V_BE",  dd.vBE(), "%8.3f V");
+        row("V_CE",  dd.vCE(), "%8.3f V");
+        row("I_C",   dd.collectorCurrent(), "%.3e a.u.",
+            ImVec4(0.60f, 1.00f, 0.80f, 1.0f));
     }
 
     ImGui::End();
@@ -476,16 +664,34 @@ void drawBandViewWindow(const BandView& view) {
 // Drift-Diffusion inspection
 // =============================================================================
 void drawDriftDiffusionWindow(const DriftDiffusion& dd) {
-    if (!ImGui::Begin("Drift-Diffusion")) { ImGui::End(); return; }
-    ImGui::Text("Grid:  %d x %d", dd.width(), dd.height());
-    ImGui::Text("Mean:  %.4f  (a.u.)", dd.meanValue());
-    ImGui::Text("Peak:  %.4f  (a.u.)", dd.maxValue());
-    ImGui::Text("Equiv. dN: %.3e cm^-3", dd.globalExcess());
+    if (!ImGui::Begin("Drift-Diffusion / Thermal")) { ImGui::End(); return; }
+
+    ImGui::SeparatorText("Carrier grid (n)");
+    ImGui::Text("Grid:       %d x %d", dd.width(), dd.height());
+    ImGui::Text("n_mean:     %.4f  (a.u.)", dd.meanValue());
+    ImGui::Text("n_peak:     %.4f  (a.u.)", dd.maxValue());
+    ImGui::Text("Equiv. dN:  %.3e cm^-3",   dd.globalExcess());
+
+    ImGui::SeparatorText("Thermal grid (T)");
+    ImGui::Text("T_amb:      %8.2f K", dd.ambientTemperature());
+    ImGui::Text("T_mean:     %8.2f K", dd.meanTemperature());
+    ImGui::Text("T_peak:     %8.2f K", dd.maxTemperature());
+    ImGui::Text("dT_avg:     %+8.2f K", dd.deltaTaverage());
+
+    if (dd.deviceMode() == DeviceMode::NpnBjt) {
+        ImGui::SeparatorText("BJT (NPN)");
+        ImGui::Text("V_BE:       %5.3f V", dd.vBE());
+        ImGui::Text("V_CE:       %5.3f V", dd.vCE());
+        ImGui::Text("I_C (proxy):%.3e a.u.", dd.collectorCurrent());
+    }
+
     ImGui::Separator();
     ImGui::TextWrapped(
-        "Equation:  dn/dt = D nabla^2 n + G(x,y) - n / tau\n"
-        "Click in the Crystal View to deposit a Gaussian source. The "
-        "carriers diffuse outward and decay on the lifetime time-scale.");
+        "Carriers: dn/dt = D nabla^2 n + G(x,y) - n / tau\n"
+        "Heat:     rho Cp dT/dt = kappa nabla^2 T + H_Joule + H_recomb\n"
+        "Click on the Crystal View to deposit a Gaussian source. In BJT "
+        "mode, V_BE injects electrons from the emitter; V_CE sweeps them "
+        "into the collector and dissipates Joule heat in the active path.");
     ImGui::End();
 }
 
@@ -515,7 +721,8 @@ int main() {
 
     auto physics = std::make_unique<PhysicsEngine>(material::Kind::Silicon);
     auto dd      = std::make_unique<DriftDiffusion>(60, 40);
-    dd->configureForMaterial(1.0, 1.6);
+    dd->configureForMaterial(physics->getMaterial());
+    dd->setAmbientTemperature(static_cast<float>(physics->getTemperature()));
 
     auto crystal = std::make_unique<CrystalView>(720);
     auto bands   = std::make_unique<BandView>(720, 540);
@@ -542,6 +749,10 @@ int main() {
         const sf::Time delta = clock.restart();
         const float    dt    = delta.asSeconds();
 
+        // ---- Sync ambient T into dd (thermal Dirichlet edges) -------------
+        dd->setAmbientTemperature(
+            static_cast<float>(physics->getTemperature()));
+
         // ---- Simulation step ----------------------------------------------
         crystal->update(dt, *physics);
         dd->step(dt);
@@ -556,7 +767,7 @@ int main() {
             crystal->rebuild(*physics);
 
         // ---- Render off-screen targets ------------------------------------
-        crystal->render(*physics, *dd, ui.showHeatmap, ui.showVectorField);
+        crystal->render(*physics, *dd, ui.heatmapMode, ui.showVectorField);
         bands->render(*physics, font);
 
         // ---- ImGui frame --------------------------------------------------
@@ -567,7 +778,7 @@ int main() {
         ImGui::End();   // close DockHost
 
         drawControlsWindow(*physics, *dd, ui);
-        drawReadoutsWindow(*physics);
+        drawReadoutsWindow(*physics, *dd);
         drawLiveOscilloscope(*physics, dt);
         drawCrystalViewWindow(*crystal, *dd, *physics, ui);
         drawBandViewWindow(*bands);

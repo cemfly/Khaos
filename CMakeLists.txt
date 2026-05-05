@@ -138,6 +138,7 @@ target_link_libraries(implot PUBLIC ImGui-SFML::ImGui-SFML)
 # =============================================================================
 add_library(semicon_physics OBJECT
     src/PhysicsEngine.cpp
+    src/Material.cpp
 )
 target_include_directories(semicon_physics PUBLIC src)
 set_target_properties(semicon_physics PROPERTIES POSITION_INDEPENDENT_CODE ON)
@@ -152,9 +153,9 @@ set_target_properties(semicon_physics PROPERTIES POSITION_INDEPENDENT_CODE ON)
 # =============================================================================
 add_executable(${PROJECT_NAME}
     src/main.cpp
-    src/CrystalLattice.cpp
-    src/BandDiagram.cpp
-    src/UIPanel.cpp
+    src/DriftDiffusion.cpp
+    src/CrystalView.cpp
+    src/BandView.cpp
     $<TARGET_OBJECTS:semicon_physics>
 )
 target_include_directories(${PROJECT_NAME} PRIVATE src)

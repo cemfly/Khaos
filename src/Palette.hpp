@@ -89,6 +89,43 @@ namespace palette {
     }
 
     // -----------------------------------------------------------------------
+    // Thermal colour ramp (blue -> cyan -> green -> yellow -> orange -> red ->
+    // white). Designed for "blackbody-ish" rendering of T(x,y) where the eye
+    // immediately reads cool/warm.
+    //
+    //   t in [0, 1]  ->  300 K  ->  ~1200 K  by convention (caller scales).
+    // -----------------------------------------------------------------------
+    [[nodiscard]] inline sf::Color thermalColor(float t) noexcept {
+        if (t <= 0.0f) return sf::Color( 30,  60, 200);     // cool blue
+        if (t >= 1.0f) return sf::Color(255, 255, 255);     // hot white
+
+        struct Stop { float t; sf::Color c; };
+        static const Stop stops[] = {
+            {0.00f, sf::Color( 30,  60, 200)},   // cool blue
+            {0.20f, sf::Color( 60, 160, 220)},   // cyan
+            {0.40f, sf::Color( 90, 220, 120)},   // green
+            {0.60f, sf::Color(255, 220,  80)},   // yellow
+            {0.80f, sf::Color(255, 130,  50)},   // orange
+            {0.95f, sf::Color(240,  60,  60)},   // red
+            {1.00f, sf::Color(255, 255, 255)},   // white-hot
+        };
+        constexpr int N = sizeof(stops) / sizeof(stops[0]);
+        for (int k = 0; k + 1 < N; ++k) {
+            if (t <= stops[k + 1].t) {
+                const float u = (t - stops[k].t)
+                              / (stops[k + 1].t - stops[k].t);
+                const auto a = stops[k].c, b = stops[k + 1].c;
+                return sf::Color(
+                    static_cast<std::uint8_t>(a.r + u * (b.r - a.r)),
+                    static_cast<std::uint8_t>(a.g + u * (b.g - a.g)),
+                    static_cast<std::uint8_t>(a.b + u * (b.b - a.b)));
+            }
+        }
+        return sf::Color(255, 255, 255);
+    }
+
+
+    // -----------------------------------------------------------------------
     // Heatmap colour ramp (approximate viridis).
     //
     //   t in [0, 1]  ->  RGB tuned for perceptual uniformity, dark purple at

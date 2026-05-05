@@ -126,25 +126,51 @@ TEST(Ionization, FreezeOutAt50K) {
 // =============================================================================
 
 TEST(Mobility, MatthiessenAt300K) {
-    // Intrinsic limit (N -> 0) must equal the lattice mobility coefficient.
-    EXPECT_NEAR(PhysicsEngine::matthiessenMobilityElectron(300.0, 0.0),
+    const auto& Si = material::Silicon;
+    EXPECT_NEAR(PhysicsEngine::matthiessenMobilityElectron(Si, 300.0, 0.0),
                 1414.0, 1.0);
-    EXPECT_NEAR(PhysicsEngine::matthiessenMobilityHole    (300.0, 0.0),
+    EXPECT_NEAR(PhysicsEngine::matthiessenMobilityHole    (Si, 300.0, 0.0),
                  470.5, 1.0);
 
-    // Heavy doping should be well below the lattice limit.
-    const double mu_n_heavy = PhysicsEngine::matthiessenMobilityElectron(
-                                  300.0, 1.0e19);
+    const double mu_n_heavy =
+        PhysicsEngine::matthiessenMobilityElectron(Si, 300.0, 1.0e19);
     EXPECT_LT(mu_n_heavy, 300.0);
 }
 
 
 TEST(Mobility, MatthiessenTemperatureScalingIntrinsic) {
-    // Pure lattice scattering: mu ~ T^(-3/2)
-    const double mu_300 = PhysicsEngine::matthiessenMobilityElectron(300.0, 0.0);
-    const double mu_600 = PhysicsEngine::matthiessenMobilityElectron(600.0, 0.0);
-    const double expectedRatio = std::pow(600.0 / 300.0, -1.5);  // = 2^-1.5
+    const auto& Si = material::Silicon;
+    const double mu_300 = PhysicsEngine::matthiessenMobilityElectron(Si, 300.0, 0.0);
+    const double mu_600 = PhysicsEngine::matthiessenMobilityElectron(Si, 600.0, 0.0);
+    const double expectedRatio = std::pow(600.0 / 300.0, -1.5);
     EXPECT_NEAR(mu_600 / mu_300, expectedRatio, 1.0e-3);
+}
+
+
+TEST(Material, GaAsHasDirectBandgapAndHigherMobility) {
+    EXPECT_TRUE (material::GalliumArsenide.isDirectBandgap);
+    EXPECT_FALSE(material::Silicon       .isDirectBandgap);
+    EXPECT_FALSE(material::Germanium     .isDirectBandgap);
+
+    // GaAs electron mobility is famously much higher than Si.
+    EXPECT_GT(material::GalliumArsenide.mu_L_n_300,
+              material::Silicon.mu_L_n_300 * 3.0);
+}
+
+
+TEST(Material, OpticalAbsorptionStrongerInGaAs) {
+    PhysicsEngine si  (material::Kind::Silicon);
+    PhysicsEngine gaas(material::Kind::GaAs);
+    for (auto* pe : { &si, &gaas }) {
+        pe->setTemperature(300.0);
+        pe->setDopingType(DopingType::Intrinsic);
+        pe->setOpticalEnabled(true);
+        pe->setWavelengthNm(500.0);   // 2.48 eV, well above both gaps
+    }
+    // Direct GaAs should produce a much larger excess than indirect Si
+    // for the same photon energy.
+    EXPECT_GT(gaas.getExcessCarrierDensity(),
+              5.0 * si.getExcessCarrierDensity());
 }
 
 

@@ -1,20 +1,21 @@
 #pragma once
 
 // =============================================================================
-// CrystalView.hpp -- Phase 5 + 5b: textured 2D crystal panel
+// CrystalView.hpp -- Phase 5 + 5b + 6: textured 2D crystal panel
 // -----------------------------------------------------------------------------
-// Renders the 2D crystal lattice + free carriers + heatmap + Lorentz vector
-// field into an offscreen sf::RenderTexture so the result can be embedded
-// in an ImGui dockable window via ImGui::Image(const sf::RenderTexture&, ...).
+// Renders the crystal lattice + free carriers + (carrier OR thermal) heatmap
+// + Lorentz vector field + (BJT) region overlay into an offscreen
+// sf::RenderTexture so the result can be embedded in an ImGui dockable
+// window.
 //
 // Layered composition (back -> front):
 //
 //   1. Background
-//   2. Heatmap   (n(x,y) from DriftDiffusion)        -- toggleable
-//   3. Lattice atoms + bonds                         -- always
-//   4. Free carriers (random walk + Lorentz curl)    -- always
-//   5. Vector field arrows (Lorentz deflection)      -- toggleable
-//
+//   2. Heatmap (carrier OR thermal)         -- toggleable
+//   3. BJT region tint (E / B / C)          -- only when DeviceMode=NpnBjt
+//   4. Lattice atoms + bonds                 -- always
+//   5. Free carriers                         -- always
+//   6. Vector field arrows (Lorentz)         -- toggleable
 // =============================================================================
 
 #include <SFML/Graphics.hpp>
@@ -26,39 +27,40 @@
 #include "PhysicsEngine.hpp"
 
 
+// -----------------------------------------------------------------------------
+// Heatmap mode (None / Carriers / Thermal). The user picks one in the UI.
+// -----------------------------------------------------------------------------
+enum class HeatmapMode : int {
+    None     = 0,
+    Carriers = 1,
+    Thermal  = 2,
+};
+
+
 class CrystalView {
 public:
     explicit CrystalView(unsigned int textureSize = 720);
 
-    // ---- State management --------------------------------------------------
-    // Sync atom and carrier arrays with the current physics state. Should
-    // be called whenever doping / material / temperature / optical state
-    // changes meaningfully.
+    // Sync atoms / carriers from the current physics state.
     void rebuild(const PhysicsEngine& physics);
 
-    // Per-frame update of the carrier random walk + Lorentz rotation.
+    // Per-frame carrier random walk + Lorentz rotation.
     void update(float dt, const PhysicsEngine& physics);
 
-    // ---- Rendering ---------------------------------------------------------
-    // Composites the layered scene into the internal RenderTexture.
+    // Composite the layered scene to the internal RenderTexture.
     void render(const PhysicsEngine&  physics,
                 const DriftDiffusion& dd,
-                bool                  showHeatmap,
+                HeatmapMode           heatmapMode,
                 bool                  showVectorField);
 
-    // RenderTexture for ImGui::Image embedding. Stable reference -- the
-    // texture is owned by this object.
     [[nodiscard]] const sf::RenderTexture& renderTexture() const noexcept {
         return m_rt;
     }
-
-    // Texture size in pixels (square).
     [[nodiscard]] unsigned int size() const noexcept {
         return m_rt.getSize().x;
     }
 
 private:
-    // ---- Internal types ----------------------------------------------------
     enum class AtomType { Host, Donor, Acceptor };
 
     struct Atom {
@@ -73,16 +75,17 @@ private:
         bool         optical;
     };
 
-    // ---- Helpers -----------------------------------------------------------
     void resampleCarriers(const PhysicsEngine& physics);
     [[nodiscard]] int targetCarrierCount(double concentration) const noexcept;
 
-    void drawHeatmap   (const DriftDiffusion& dd);
-    void drawLattice   (const PhysicsEngine& physics);
-    void drawCarriers  ();
-    void drawVectorField(const PhysicsEngine& physics);
+    void drawCarrierHeatmap(const DriftDiffusion& dd);
+    void drawThermalHeatmap(const DriftDiffusion& dd);
+    void drawBjtRegions    (const DriftDiffusion& dd);
+    void drawLattice       (const PhysicsEngine& physics);
+    void drawCarriers      ();
+    void drawVectorField   (const PhysicsEngine& physics);
 
-    // ---- Geometry / state --------------------------------------------------
+    // ---- State -------------------------------------------------------------
     sf::RenderTexture m_rt;
     sf::Vector2f      m_topLeft;
     sf::Vector2f      m_size;
