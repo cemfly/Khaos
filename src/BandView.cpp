@@ -1,3 +1,10 @@
+// =============================================================================
+// BandView.cpp
+//
+//   Author : dex / cemfly-april2026
+//   License: MIT
+// =============================================================================
+
 #include "BandView.hpp"
 
 #include <algorithm>
@@ -200,8 +207,8 @@ void BandView::render(const PhysicsEngine& physics, const sf::Font& font) {
         sf::RectangleShape axisBox;
         axisBox.setPosition({fdX1, 40.f});
         axisBox.setSize({fdX2 - fdX1, H - 60.f});
-        axisBox.setFillColor(sf::Color(25, 30, 40));
-        axisBox.setOutlineColor(sf::Color(100, 110, 130));
+        axisBox.setFillColor(sf::Color(255, 255, 255));
+        axisBox.setOutlineColor(palette::PanelEdge);
         axisBox.setOutlineThickness(1.f);
         m_rt.draw(axisBox);
     }

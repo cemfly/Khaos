@@ -1,5 +1,8 @@
 // =============================================================================
 // tests/test_physics.cpp
+//
+//   Author : dex / cemfly-april2026
+//   License: MIT
 // -----------------------------------------------------------------------------
 // GoogleTest-based unit tests for PhysicsEngine.
 //

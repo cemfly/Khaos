@@ -1,7 +1,10 @@
 #pragma once
 
 // =============================================================================
-// DriftDiffusion.hpp -- Phase 6: 2D coupled electrothermal solver
+// DriftDiffusion.hpp -- 2D coupled electrothermal solver
+//
+//   Author : dex / cemfly-april2026
+//   License: MIT
 // -----------------------------------------------------------------------------
 // What started in Phase 7 of the SFML era as a single carrier-diffusion grid
 // now hosts three coupled fields plus a region map:

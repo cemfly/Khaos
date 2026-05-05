@@ -1,7 +1,10 @@
 #pragma once
 
 // =============================================================================
-// CrystalView.hpp -- Phase 5 + 5b + 6: textured 2D crystal panel
+// CrystalView.hpp -- textured 2D crystal panel
+//
+//   Author : dex / cemfly-april2026
+//   License: MIT
 // -----------------------------------------------------------------------------
 // Renders the crystal lattice + free carriers + (carrier OR thermal) heatmap
 // + Lorentz vector field + (BJT) region overlay into an offscreen

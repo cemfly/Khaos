@@ -1,7 +1,10 @@
 #pragma once
 
 // =============================================================================
-// PhysicsEngine.hpp -- Phase 6: multi-material core
+// PhysicsEngine.hpp -- multi-material semiconductor physics core
+//
+//   Author : dex / cemfly-april2026
+//   License: MIT
 // -----------------------------------------------------------------------------
 // Semiconductor physics core for the Analysis & Simulation Platform.
 //

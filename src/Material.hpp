@@ -1,7 +1,10 @@
 #pragma once
 
 // =============================================================================
-// Material.hpp -- Phase 6: multi-material profiles
+// Material.hpp -- Si / GaAs / Ge profiles
+//
+//   Author : dex / cemfly-april2026
+//   License: MIT
 // -----------------------------------------------------------------------------
 // Bundles every material-dependent constant the PhysicsEngine consumes into
 // a single immutable struct. Three profiles ship out-of-the-box:

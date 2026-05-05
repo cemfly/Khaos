@@ -1,3 +1,10 @@
+// =============================================================================
+// CrystalView.cpp
+//
+//   Author : dex / cemfly-april2026
+//   License: MIT
+// =============================================================================
+
 #include "CrystalView.hpp"
 
 #include <algorithm>
@@ -293,7 +300,7 @@ void CrystalView::drawLattice(const PhysicsEngine& physics) {
     for (int r = 0; r < m_rows; ++r) {
         for (int c = 0; c < m_cols; ++c) {
             const auto& a = m_atoms[r * m_cols + c];
-            const sf::Color col(70, 80, 100);
+            const sf::Color col(160, 175, 200);   // light blue-grey on white
             if (c + 1 < m_cols) {
                 const auto& b = m_atoms[r * m_cols + (c + 1)];
                 bonds.append(sf::Vertex{a.pos, col});
@@ -318,17 +325,17 @@ void CrystalView::drawLattice(const PhysicsEngine& physics) {
         switch (a.type) {
             case AtomType::Host:
                 atom.setFillColor(hostCol);
-                atom.setOutlineColor(sf::Color(220, 230, 245));
+                atom.setOutlineColor(sf::Color(40, 50, 70, 140));
                 atom.setOutlineThickness(1.f);
                 break;
             case AtomType::Donor:
                 atom.setFillColor(palette::Phosphorus);
-                atom.setOutlineColor(sf::Color(220, 255, 200));
+                atom.setOutlineColor(sf::Color(20, 70, 30, 180));
                 atom.setOutlineThickness(1.5f);
                 break;
             case AtomType::Acceptor:
                 atom.setFillColor(palette::Boron);
-                atom.setOutlineColor(sf::Color(255, 200, 200));
+                atom.setOutlineColor(sf::Color(100, 30, 30, 180));
                 atom.setOutlineThickness(1.5f);
                 break;
         }
@@ -348,8 +355,9 @@ void CrystalView::drawCarriers() {
         const sf::Color fill = c.electron
             ? (c.optical ? palette::ElectronOpt : palette::Electron)
             : (c.optical ? palette::HoleOpt     : palette::Hole);
-        const sf::Color outline = c.electron ? sf::Color(255, 255, 220)
-                                             : sf::Color(255, 220, 240);
+        // Dark thin outlines so dots stay legible on the light background.
+        const sf::Color outline = c.electron ? sf::Color(110, 60, 20, 200)
+                                             : sf::Color( 60, 20, 80, 200);
         dot.setFillColor(fill);
         dot.setOutlineColor(outline);
         dot.setOutlineThickness(c.optical ? 1.5f : 1.f);

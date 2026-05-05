@@ -1,4 +1,9 @@
-# Build artefacts
+# =============================================================================
+# .gitignore
+#   Author: dex / cemfly-april2026
+# =============================================================================
+
+# ---- Build artefacts ---------------------------------------------------------
 build/
 out/
 cmake-build-*/
@@ -6,6 +11,7 @@ CMakeFiles/
 CMakeCache.txt
 cmake_install.cmake
 Makefile
+compile_commands.json
 *.o
 *.obj
 *.exe
@@ -13,15 +19,30 @@ Makefile
 *.so
 *.dylib
 *.a
+*.lib
+*.exp
+*.pdb
+*.ilk
 
-# IDE
+# ---- ImGui state -------------------------------------------------------------
+imgui.ini
+
+# ---- Simulator output --------------------------------------------------------
+export_data.csv
+*.csv
+
+# ---- User-supplied font (license-encumbered, do not ship) --------------------
+assets/font.ttf
+
+# ---- IDE / editor metadata ---------------------------------------------------
 .vscode/
 .idea/
 *.user
+*.suo
+.cache/
+.cmake/
 
-# OS
+# ---- OS metadata -------------------------------------------------------------
 .DS_Store
 Thumbs.db
-
-# Fonts dropped locally
-assets/font.ttf
+desktop.ini

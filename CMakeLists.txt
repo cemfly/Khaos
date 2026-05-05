@@ -188,6 +188,44 @@ if(WIN32 AND TARGET SFML::Graphics)
     )
 endif()
 
+# -----------------------------------------------------------------------------
+# MinGW/UCRT64 runtime DLLs.
+#
+#   On MinGW (MSYS2 UCRT64) the executable depends on a chain of unsigned
+#   DLLs (libstdc++-6.dll, libgcc_s_seh-1.dll, libwinpthread-1.dll, plus
+#   anything pulled in by SFML such as freetype/png/harfbuzz/zlib/...).
+#   When the user double-clicks the exe from Explorer, %PATH% does not
+#   include C:\msys64\ucrt64\bin, so loading fails.
+#
+#   We resolve every required DLL once (via `ldd`) and copy whatever lives
+#   under the toolchain's bin/ directory next to the binary. CMake calls
+#   the small inline script after every successful link.
+# -----------------------------------------------------------------------------
+if(WIN32 AND MINGW)
+    # objdump from the same toolchain is more reliable than ldd: it lists
+    # the binary's declared imports without resolving them through %PATH%.
+    get_filename_component(MINGW_BIN_DIR ${CMAKE_CXX_COMPILER} DIRECTORY)
+    find_program(OBJDUMP_PROGRAM
+        NAMES objdump.exe objdump
+        PATHS ${MINGW_BIN_DIR}
+        NO_DEFAULT_PATH)
+
+    if(OBJDUMP_PROGRAM)
+        add_custom_command(
+            TARGET ${PROJECT_NAME} POST_BUILD
+            COMMAND ${CMAKE_COMMAND}
+                -DEXE=$<TARGET_FILE:${PROJECT_NAME}>
+                -DOUT=$<TARGET_FILE_DIR:${PROJECT_NAME}>
+                -DOBJDUMP=${OBJDUMP_PROGRAM}
+                -DBINDIR=${MINGW_BIN_DIR}
+                -P ${CMAKE_SOURCE_DIR}/cmake/copy_runtime_dlls.cmake
+            COMMENT "Copying MinGW runtime DLLs next to ${PROJECT_NAME}"
+        )
+    else()
+        message(WARNING "objdump not found; skipping MinGW DLL bundling")
+    endif()
+endif()
+
 
 # =============================================================================
 # 7) Unit tests (GoogleTest via FetchContent)

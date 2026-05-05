@@ -1,7 +1,10 @@
 #pragma once
 
 // =============================================================================
-// BandView.hpp -- Phase 5: textured band diagram panel
+// BandView.hpp -- textured band diagram panel
+//
+//   Author : dex / cemfly-april2026
+//   License: MIT
 // -----------------------------------------------------------------------------
 // Renders the energy band diagram (E_v / E_c / E_f / dopant level) and the
 // Fermi-Dirac distribution into an offscreen RenderTexture so it can be

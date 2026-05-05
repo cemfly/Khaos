@@ -1,5 +1,8 @@
 // =============================================================================
-// main.cpp -- Semiconductor Analysis & Simulation Platform (Phase 7)
+// main.cpp -- Semiconductor Analysis & Simulation Platform
+//
+//   Author : dex / cemfly-april2026
+//   License: MIT
 // -----------------------------------------------------------------------------
 // Window, ImGui dock-space, panel composition, event routing.
 //
@@ -98,25 +101,28 @@ void enableImGuiDocking() {
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
 }
 
-void applyDarkStyle() {
-    ImGui::StyleColorsDark();
+// =============================================================================
+// applyLightStyle -- light "scientific" theme, COMSOL / MATLAB / Mathematica
+// inspired. White-ish backgrounds, dark slate text, mid-blue accents.
+// =============================================================================
+void applyLightStyle() {
+    ImGui::StyleColorsLight();
     ImGuiStyle& s = ImGui::GetStyle();
 
-    // Roundings -- a touch of softness, still industrial.
-    s.WindowRounding    = 6.0f;
+    // Roundings -- subtle, no Material-Design exaggeration.
+    s.WindowRounding    = 5.0f;
     s.ChildRounding     = 4.0f;
-    s.FrameRounding     = 4.0f;
-    s.GrabRounding      = 4.0f;
+    s.FrameRounding     = 3.0f;
+    s.GrabRounding      = 3.0f;
     s.PopupRounding     = 4.0f;
-    s.TabRounding       = 4.0f;
+    s.TabRounding       = 3.0f;
 
-    // Borders for clean panel separation.
     s.WindowBorderSize  = 1.0f;
     s.ChildBorderSize   = 1.0f;
-    s.FrameBorderSize   = 0.0f;
+    s.FrameBorderSize   = 1.0f;
     s.PopupBorderSize   = 1.0f;
 
-    // Generous spacing -- "breathing room" the user explicitly asked for.
+    // Generous spacing -- breathing room.
     s.WindowPadding     = ImVec2(12.0f, 12.0f);
     s.FramePadding      = ImVec2( 8.0f,  5.0f);
     s.CellPadding       = ImVec2( 6.0f,  4.0f);
@@ -126,27 +132,64 @@ void applyDarkStyle() {
     s.ScrollbarSize     = 14.0f;
     s.GrabMinSize       = 12.0f;
 
-    // Slightly tighter colour scheme: deeper background, brighter accents.
     ImVec4* c = s.Colors;
-    c[ImGuiCol_WindowBg]        = ImVec4(0.10f, 0.11f, 0.14f, 1.00f);
-    c[ImGuiCol_ChildBg]         = ImVec4(0.07f, 0.08f, 0.10f, 1.00f);
-    c[ImGuiCol_PopupBg]         = ImVec4(0.10f, 0.11f, 0.14f, 0.96f);
-    c[ImGuiCol_Border]          = ImVec4(0.32f, 0.36f, 0.42f, 0.50f);
-    c[ImGuiCol_FrameBg]         = ImVec4(0.16f, 0.18f, 0.22f, 1.00f);
-    c[ImGuiCol_FrameBgHovered]  = ImVec4(0.22f, 0.26f, 0.32f, 1.00f);
-    c[ImGuiCol_FrameBgActive]   = ImVec4(0.28f, 0.34f, 0.42f, 1.00f);
-    c[ImGuiCol_TitleBg]         = ImVec4(0.10f, 0.12f, 0.16f, 1.00f);
-    c[ImGuiCol_TitleBgActive]   = ImVec4(0.18f, 0.24f, 0.34f, 1.00f);
-    c[ImGuiCol_Header]          = ImVec4(0.20f, 0.30f, 0.42f, 0.65f);
-    c[ImGuiCol_HeaderHovered]   = ImVec4(0.25f, 0.40f, 0.55f, 0.85f);
-    c[ImGuiCol_HeaderActive]    = ImVec4(0.30f, 0.50f, 0.70f, 1.00f);
-    c[ImGuiCol_Tab]             = ImVec4(0.13f, 0.16f, 0.22f, 1.00f);
-    c[ImGuiCol_TabHovered]      = ImVec4(0.30f, 0.45f, 0.60f, 1.00f);
-    c[ImGuiCol_TabActive]       = ImVec4(0.20f, 0.35f, 0.50f, 1.00f);
-    c[ImGuiCol_DockingPreview]  = ImVec4(0.40f, 0.60f, 0.95f, 0.50f);
-    c[ImGuiCol_Separator]       = ImVec4(0.35f, 0.40f, 0.48f, 0.60f);
-    c[ImGuiCol_SliderGrab]      = ImVec4(0.85f, 0.80f, 0.30f, 1.00f);
-    c[ImGuiCol_SliderGrabActive]= ImVec4(1.00f, 0.92f, 0.40f, 1.00f);
+
+    // Backgrounds  (white  ->  near-white  ->  off-white)
+    c[ImGuiCol_WindowBg]            = ImVec4(0.972f, 0.976f, 0.984f, 1.00f);
+    c[ImGuiCol_ChildBg]             = ImVec4(1.000f, 1.000f, 1.000f, 1.00f);
+    c[ImGuiCol_PopupBg]             = ImVec4(0.985f, 0.985f, 0.990f, 0.98f);
+    c[ImGuiCol_MenuBarBg]           = ImVec4(0.945f, 0.950f, 0.960f, 1.00f);
+
+    // Borders / separators (cool grey)
+    c[ImGuiCol_Border]              = ImVec4(0.725f, 0.764f, 0.823f, 0.65f);
+    c[ImGuiCol_BorderShadow]        = ImVec4(0.000f, 0.000f, 0.000f, 0.00f);
+    c[ImGuiCol_Separator]           = ImVec4(0.745f, 0.784f, 0.843f, 0.65f);
+    c[ImGuiCol_SeparatorHovered]    = ImVec4(0.235f, 0.431f, 0.784f, 0.78f);
+    c[ImGuiCol_SeparatorActive]     = ImVec4(0.235f, 0.431f, 0.784f, 1.00f);
+
+    // Text
+    c[ImGuiCol_Text]                = ImVec4(0.110f, 0.133f, 0.180f, 1.00f);
+    c[ImGuiCol_TextDisabled]        = ImVec4(0.470f, 0.510f, 0.580f, 1.00f);
+
+    // Frame (input bg)
+    c[ImGuiCol_FrameBg]             = ImVec4(0.960f, 0.965f, 0.975f, 1.00f);
+    c[ImGuiCol_FrameBgHovered]      = ImVec4(0.890f, 0.910f, 0.945f, 1.00f);
+    c[ImGuiCol_FrameBgActive]       = ImVec4(0.815f, 0.870f, 0.945f, 1.00f);
+
+    // Title bars
+    c[ImGuiCol_TitleBg]             = ImVec4(0.910f, 0.925f, 0.945f, 1.00f);
+    c[ImGuiCol_TitleBgActive]       = ImVec4(0.745f, 0.835f, 0.945f, 1.00f);
+    c[ImGuiCol_TitleBgCollapsed]    = ImVec4(0.910f, 0.925f, 0.945f, 0.75f);
+
+    // CollapsingHeader
+    c[ImGuiCol_Header]              = ImVec4(0.745f, 0.835f, 0.945f, 0.65f);
+    c[ImGuiCol_HeaderHovered]       = ImVec4(0.470f, 0.670f, 0.910f, 0.78f);
+    c[ImGuiCol_HeaderActive]        = ImVec4(0.235f, 0.510f, 0.870f, 0.85f);
+
+    // Buttons
+    c[ImGuiCol_Button]              = ImVec4(0.870f, 0.910f, 0.965f, 1.00f);
+    c[ImGuiCol_ButtonHovered]       = ImVec4(0.700f, 0.815f, 0.945f, 1.00f);
+    c[ImGuiCol_ButtonActive]        = ImVec4(0.470f, 0.670f, 0.910f, 1.00f);
+
+    // Sliders
+    c[ImGuiCol_SliderGrab]          = ImVec4(0.235f, 0.431f, 0.784f, 1.00f);
+    c[ImGuiCol_SliderGrabActive]    = ImVec4(0.137f, 0.333f, 0.686f, 1.00f);
+
+    // Tabs
+    c[ImGuiCol_Tab]                 = ImVec4(0.890f, 0.910f, 0.945f, 1.00f);
+    c[ImGuiCol_TabHovered]          = ImVec4(0.700f, 0.815f, 0.945f, 1.00f);
+    c[ImGuiCol_TabActive]           = ImVec4(0.470f, 0.670f, 0.910f, 1.00f);
+    c[ImGuiCol_TabUnfocused]        = ImVec4(0.910f, 0.925f, 0.945f, 1.00f);
+    c[ImGuiCol_TabUnfocusedActive]  = ImVec4(0.815f, 0.870f, 0.945f, 1.00f);
+
+    // Docking
+    c[ImGuiCol_DockingPreview]      = ImVec4(0.235f, 0.510f, 0.870f, 0.55f);
+    c[ImGuiCol_DockingEmptyBg]      = ImVec4(0.945f, 0.950f, 0.960f, 1.00f);
+
+    // Plots
+    c[ImGuiCol_PlotLines]           = ImVec4(0.235f, 0.431f, 0.784f, 1.00f);
+    c[ImGuiCol_PlotLinesHovered]    = ImVec4(0.870f, 0.215f, 0.215f, 1.00f);
+    c[ImGuiCol_PlotHistogram]       = ImVec4(0.235f, 0.431f, 0.784f, 1.00f);
 }
 
 
@@ -294,7 +337,7 @@ struct UIState {
 // Menu bar
 // =============================================================================
 void drawMenuBar(bool& running, UIState& ui, PhysicsEngine& physics,
-                 DriftDiffusion& dd)
+                 DriftDiffusion& dd, bool& requestResetLayout)
 {
     if (ImGui::BeginMenuBar()) {
         if (ImGui::BeginMenu("File")) {
@@ -309,24 +352,29 @@ void drawMenuBar(bool& running, UIState& ui, PhysicsEngine& physics,
             ImGui::EndMenu();
         }
         if (ImGui::BeginMenu("View")) {
-            if (ImGui::BeginMenu("Heatmap")) {
+            if (ImGui::BeginMenu("Heatmap layer")) {
                 bool h_none = ui.heatmapMode == HeatmapMode::None;
                 bool h_n    = ui.heatmapMode == HeatmapMode::Carriers;
                 bool h_T    = ui.heatmapMode == HeatmapMode::Thermal;
-                if (ImGui::MenuItem("Off",            nullptr, &h_none))
+                if (ImGui::MenuItem("Off",             nullptr, &h_none))
                     ui.heatmapMode = HeatmapMode::None;
-                if (ImGui::MenuItem("Carriers n(x,y)",nullptr, &h_n))
+                if (ImGui::MenuItem("Carriers n(x,y)", nullptr, &h_n))
                     ui.heatmapMode = HeatmapMode::Carriers;
-                if (ImGui::MenuItem("Thermal T(x,y)", nullptr, &h_T))
+                if (ImGui::MenuItem("Thermal T(x,y)",  nullptr, &h_T))
                     ui.heatmapMode = HeatmapMode::Thermal;
                 ImGui::EndMenu();
             }
             ImGui::MenuItem("Lorentz vectors",   nullptr, &ui.showVectorField);
             ImGui::MenuItem("Click adds source", nullptr, &ui.ddInteractive);
+            ImGui::Separator();
             if (ImGui::MenuItem("Clear sources / reset thermal")) {
                 dd.clear();
                 physics.setDriftDiffusionExcess(0.0);
                 ui.flashStatus("Drift-diffusion + thermal grid cleared");
+            }
+            if (ImGui::MenuItem("Reset window layout")) {
+                requestResetLayout = true;
+                ui.flashStatus("Layout restored to default");
             }
             ImGui::EndMenu();
         }
@@ -357,128 +405,191 @@ void drawControlsWindow(PhysicsEngine& physics,
 {
     if (!ImGui::Begin("Controls")) { ImGui::End(); return; }
 
-    // ---- Material picker --------------------------------------------------
+    // =====================================================================
+    // Material & Doping
+    // =====================================================================
+    if (ImGui::CollapsingHeader("Material & Doping",
+                                ImGuiTreeNodeFlags_DefaultOpen))
     {
         int current = static_cast<int>(physics.getMaterialKind());
         if (ImGui::Combo("Material", &current,
                          material::kLabels, material::kCount))
         {
             physics.setMaterial(static_cast<material::Kind>(current));
-            // Re-tune drift-diffusion + thermal integrator for the new material.
             dd.configureForMaterial(physics.getMaterial());
         }
+        HelpMarker(
+            "Switches the physics engine between Si / GaAs / Ge profiles. "
+            "Each one carries its own Varshni coefficients, effective DOS, "
+            "Matthiessen mobility constants, optical absorption character "
+            "(direct vs indirect) and thermal conductivity.");
+
         const auto& m = physics.getMaterial();
-        ImGui::TextDisabled(
-            "%s | E_g(0)=%.3f eV | %s",
-            std::string(m.name).c_str(),
-            m.Eg0,
+        ImGui::TextDisabled("%s  |  E_g(0)=%.3f eV  |  %s",
+            std::string(m.name).c_str(), m.Eg0,
             m.isDirectBandgap ? "DIRECT bandgap" : "indirect bandgap");
+
+        const char* dopingLabels[] = { "Intrinsic", "n-type", "p-type" };
+        int dt_idx = static_cast<int>(physics.getDopingType());
+        if (ImGui::Combo("Doping type", &dt_idx, dopingLabels,
+                         IM_ARRAYSIZE(dopingLabels)))
+            physics.setDopingType(static_cast<DopingType>(dt_idx));
+        HelpMarker(
+            "Intrinsic: pure host, n = p = n_i. n-type adds donor atoms "
+            "(P in Si, Si on Ga site in GaAs). p-type adds acceptors "
+            "(B in Si, Be in GaAs).");
+
+        float logN = static_cast<float>(std::log10(
+            std::max(physics.getDopingConcentration(), 1.0e10)));
+        if (ImGui::SliderFloat("log10 N", &logN, 14.0f, 19.0f, "%.2f"))
+            physics.setDopingConcentration(std::pow(10.0f, logN));
+        HelpMarker(
+            "Doping concentration in cm^-3 on a logarithmic scale. "
+            "Slider value is log10 of the dopant density.");
+        ImGui::SameLine();
+        ImGui::TextDisabled("(%.2e cm^-3)", physics.getDopingConcentration());
+
+        bool ii = physics.getIncompleteIonization();
+        if (ImGui::Checkbox("Incomplete ionization (freeze-out)", &ii))
+            physics.setIncompleteIonization(ii);
+        HelpMarker(
+            "When enabled, the donor / acceptor ionization is governed by "
+            "Fermi-Dirac statistics:\n"
+            "  N_d^+ = N_d / (1 + g_D exp((E_f - E_d)/kT))\n"
+            "  N_a^- = N_a / (1 + g_A exp((E_a - E_f)/kT))\n"
+            "At cryogenic temperatures, this exposes the carrier freeze-out "
+            "regime where n << N_d.");
     }
 
-    ImGui::Separator();
-
-    // ---- Temperature ------------------------------------------------------
+    // =====================================================================
+    // Thermal & Transport
+    // =====================================================================
+    if (ImGui::CollapsingHeader("Thermal & Transport",
+                                ImGuiTreeNodeFlags_DefaultOpen))
     {
         float T = static_cast<float>(physics.getTemperature());
         if (ImGui::SliderFloat("Temperature [K]", &T, 100.0f, 600.0f, "%.1f"))
             physics.setTemperature(T);
-    }
+        HelpMarker(
+            "Lattice temperature. Drives the Varshni bandgap E_g(T), the "
+            "effective DOS (T^(3/2) scaling) and the lattice-limited "
+            "mobility (T^(-3/2)). Also sets the Dirichlet boundary "
+            "condition on the 2D thermal grid.");
 
-    // ---- Doping concentration --------------------------------------------
-    {
-        float logN = static_cast<float>(std::log10(
-            std::max(physics.getDopingConcentration(), 1.0e10)));
-        if (ImGui::SliderFloat("log10 N [cm^-3]", &logN, 14.0f, 19.0f, "%.2f"))
-            physics.setDopingConcentration(std::pow(10.0f, logN));
-        ImGui::SameLine();
-        ImGui::TextDisabled("(N=%.2e)", physics.getDopingConcentration());
-    }
-
-    // ---- Doping type ------------------------------------------------------
-    {
-        const char* labels[] = { "Intrinsic", "n-type", "p-type" };
-        int current = static_cast<int>(physics.getDopingType());
-        if (ImGui::Combo("Doping type", &current, labels, IM_ARRAYSIZE(labels)))
-            physics.setDopingType(static_cast<DopingType>(current));
-    }
-
-    // ---- Toggles ----------------------------------------------------------
-    {
-        bool ii = physics.getIncompleteIonization();
-        if (ImGui::Checkbox("Incomplete ionization (freeze-out)", &ii))
-            physics.setIncompleteIonization(ii);
-    }
-    {
         const char* mlabs[] = { "Matthiessen", "Arora" };
         int mm = static_cast<int>(physics.getMobilityModel());
         if (ImGui::Combo("Mobility model", &mm, mlabs, IM_ARRAYSIZE(mlabs)))
             physics.setMobilityModel(static_cast<MobilityModel>(mm));
+        HelpMarker(
+            "Matthiessen: 1/mu = 1/mu_lattice + 1/mu_impurity, with explicit "
+            "T^(-3/2) phonon and T^(3/2)/N impurity scattering scaling.\n"
+            "Arora: empirical Caughey-Thomas form fitted on Si experimental "
+            "data; useful for cross-checking the Matthiessen prediction.");
     }
 
-    ImGui::Separator();
-
-    // ---- Optical ----------------------------------------------------------
+    // =====================================================================
+    // Optical
+    // =====================================================================
+    if (ImGui::CollapsingHeader("Optical"))
     {
         bool light = physics.getOpticalEnabled();
-        if (ImGui::Checkbox("Light source", &light))
+        if (ImGui::Checkbox("Light source ON", &light))
             physics.setOpticalEnabled(light);
+        HelpMarker(
+            "Toggles the photon source. When the photon energy hv = hc/lambda "
+            "exceeds E_g, electron-hole pairs are generated and Delta n is "
+            "added to the steady-state carrier population. GaAs (direct gap) "
+            "shows a much steeper response than Si (indirect).");
 
         float lambda = static_cast<float>(physics.getWavelengthNm());
         if (ImGui::SliderFloat("Wavelength [nm]", &lambda,
                                300.0f, 1500.0f, "%.0f"))
             physics.setWavelengthNm(lambda);
         ImGui::SameLine();
-        ImGui::TextDisabled("E=%.2f eV",
+        ImGui::TextDisabled("(E=%.2f eV)",
             PhysicsEngine::photonEnergyEv(physics.getWavelengthNm()));
     }
 
-    // ---- Magnetic ---------------------------------------------------------
+    // =====================================================================
+    // Magnetic
+    // =====================================================================
+    if (ImGui::CollapsingHeader("Magnetic"))
     {
         float B = static_cast<float>(physics.getMagneticField());
         if (ImGui::SliderFloat("B field [T]", &B, 0.0f, 10.0f, "%.2f"))
             physics.setMagneticField(B);
+        HelpMarker(
+            "Magnetic field perpendicular to the screen plane. Drives "
+            "the Lorentz force F = q(v x B) on free carriers (visible as "
+            "opposite curl directions for electrons vs holes) and sets the "
+            "sign / magnitude of the Hall coefficient R_H.");
     }
 
-    ImGui::Separator();
-
-    // ---- Device mode (Phase 6) -------------------------------------------
+    // =====================================================================
+    // Device & BJT
+    // =====================================================================
+    if (ImGui::CollapsingHeader("Device & BJT"))
     {
         const char* devLabels[] = { "Bulk wafer", "NPN BJT" };
         int dev = static_cast<int>(dd.deviceMode());
-        if (ImGui::Combo("Device mode", &dev, devLabels, IM_ARRAYSIZE(devLabels))) {
+        if (ImGui::Combo("Device mode", &dev, devLabels, IM_ARRAYSIZE(devLabels)))
             dd.setDeviceMode(static_cast<DeviceMode>(dev));
+        HelpMarker(
+            "Bulk: a single homogeneous wafer; click in the Crystal View to "
+            "deposit a Gaussian generation source.\n"
+            "NPN BJT: the grid is partitioned into Emitter | Base | Collector. "
+            "V_BE forward-biases the base-emitter junction (electron "
+            "injection); V_CE reverse-biases the collector and sweeps "
+            "carriers across the base.");
+
+        if (dd.deviceMode() == DeviceMode::NpnBjt) {
+            if (ImGui::SliderFloat("V_BE [V]", &ui.V_BE, 0.0f, 1.0f, "%.3f"))
+                dd.setBjtVoltages(ui.V_BE, ui.V_CE);
+            HelpMarker(
+                "Base-emitter forward bias. Emitter electron concentration "
+                "follows  n_E = n_0 * exp(q V_BE / kT)  --  exponential in "
+                "V_BE.");
+
+            if (ImGui::SliderFloat("V_CE [V]", &ui.V_CE, 0.0f, 5.0f, "%.2f"))
+                dd.setBjtVoltages(ui.V_BE, ui.V_CE);
+            HelpMarker(
+                "Collector-emitter bias. Drives the collector sweep-out "
+                "rate and contributes to Joule heating along the active "
+                "path. Together with V_BE it defines the BJT operating "
+                "point (cut-off / forward-active / saturation).");
         }
     }
-    if (dd.deviceMode() == DeviceMode::NpnBjt) {
-        if (ImGui::SliderFloat("V_BE [V]", &ui.V_BE, 0.0f, 1.0f, "%.3f")) {
-            dd.setBjtVoltages(ui.V_BE, ui.V_CE);
-        }
-        if (ImGui::SliderFloat("V_CE [V]", &ui.V_CE, 0.0f, 5.0f, "%.2f")) {
-            dd.setBjtVoltages(ui.V_BE, ui.V_CE);
-        }
-        ImGui::TextDisabled(
-            "Forward biasing V_BE injects electrons from the emitter; V_CE "
-            "sweeps them through the base into the collector. I_C = %.3f a.u.",
-            dd.collectorCurrent());
-    }
 
-    ImGui::Separator();
-
-    // ---- Heatmap mode (3-way picker) -------------------------------------
+    // =====================================================================
+    // Visualization
+    // =====================================================================
+    if (ImGui::CollapsingHeader("Visualization"))
     {
         const char* hLabels[] = { "Off", "Carriers n(x,y)", "Thermal T(x,y)" };
         int hm = static_cast<int>(ui.heatmapMode);
-        if (ImGui::Combo("Heatmap layer", &hm, hLabels, IM_ARRAYSIZE(hLabels))) {
+        if (ImGui::Combo("Heatmap layer", &hm, hLabels, IM_ARRAYSIZE(hLabels)))
             ui.heatmapMode = static_cast<HeatmapMode>(hm);
+        HelpMarker(
+            "Off: lattice + carriers only.\n"
+            "Carriers: viridis overlay of the n(x,y) grid (laser spots, "
+            "BJT injection profile).\n"
+            "Thermal: blue (300 K) -> yellow / red / white (>900 K) overlay "
+            "of T(x,y). Use this to spot thermal runaway in BJT mode.");
+
+        ImGui::Checkbox("Lorentz vectors",  &ui.showVectorField);
+        ImGui::Checkbox("Click adds source",&ui.ddInteractive);
+        HelpMarker(
+            "When enabled, left-clicking inside the Crystal View deposits a "
+            "Gaussian generation source onto the carrier grid. Use this to "
+            "explore drift-diffusion in bulk mode.");
+
+        ImGui::SliderFloat("Source intensity", &ui.sourceIntensity, 0.1f, 5.0f);
+        ImGui::SliderFloat("Source size",      &ui.sourceSigma,     0.02f, 0.20f);
+
+        if (ImGui::Button("Clear sources / reset thermal grid")) {
+            dd.clear();
+            physics.setDriftDiffusionExcess(0.0);
         }
-    }
-    ImGui::Checkbox("Show Lorentz vectors",   &ui.showVectorField);
-    ImGui::Checkbox("Click adds drift-diffusion source", &ui.ddInteractive);
-    ImGui::SliderFloat("Source intensity",    &ui.sourceIntensity, 0.1f, 5.0f);
-    ImGui::SliderFloat("Source size",         &ui.sourceSigma,     0.02f, 0.20f);
-    if (ImGui::Button("Clear sources / reset thermal")) {
-        dd.clear();
-        physics.setDriftDiffusionExcess(0.0);
     }
 
     ImGui::End();
@@ -628,6 +739,15 @@ void drawCrystalViewWindow(const CrystalView&    view,
                  sf::Vector2f(static_cast<float>(size.x),
                               static_cast<float>(size.y)));
 
+    // Hover tooltip on the image itself instead of an inline help line.
+    if (ui.ddInteractive && ImGui::IsItemHovered()) {
+        if (ImGui::BeginTooltip()) {
+            ImGui::TextUnformatted(
+                "Left-click: deposit a Gaussian generation source here.");
+            ImGui::EndTooltip();
+        }
+    }
+
     // Click-to-add source.
     if (ui.ddInteractive
         && ImGui::IsItemHovered()
@@ -642,7 +762,138 @@ void drawCrystalViewWindow(const CrystalView&    view,
         physics.setDriftDiffusionExcess(dd.globalExcess());
     }
 
-    ImGui::TextDisabled("Click on the lattice to add a drift-diffusion source.");
+    ImGui::End();
+}
+
+
+// =============================================================================
+// Spectrum window  (DOS + absorption coefficient)
+// -----------------------------------------------------------------------------
+//   * g_c(E) ~ sqrt(E - E_c)     (parabolic CB DOS)
+//   * g_v(E) ~ sqrt(E_v - E)     (parabolic VB DOS)
+//   * alpha(hv) ~ (hv - E_g)^p
+//       p = 1/2 for direct gap (GaAs)
+//       p = 2   for indirect gap (Si, Ge); approximated as p = 1 here so
+//               the curve fits comfortably on the visible y range.
+//
+//   Static buffers reused across frames (zero-allocation steady state).
+// =============================================================================
+void drawSpectrumWindow(const PhysicsEngine& physics) {
+    if (!ImGui::Begin("Spectrum")) { ImGui::End(); return; }
+
+    static std::vector<float> energies;
+    static std::vector<float> dos_c;
+    static std::vector<float> dos_v;
+    static std::vector<float> alpha;
+
+    constexpr int kSamples = 200;
+    if (energies.capacity() < kSamples + 1) {
+        energies.reserve(kSamples + 1);
+        dos_c   .reserve(kSamples + 1);
+        dos_v   .reserve(kSamples + 1);
+        alpha   .reserve(kSamples + 1);
+    }
+    energies.clear();
+    dos_c   .clear();
+    dos_v   .clear();
+    alpha   .clear();
+
+    const auto& mat = physics.getMaterial();
+    const double Eg = physics.getBandgap();
+    const double Ec = Eg;
+    const double Ev = 0.0;
+    const float  p  = mat.isDirectBandgap ? 0.5f : 1.0f;
+
+    for (int i = 0; i <= kSamples; ++i) {
+        const double E = -0.4 + 2.4 * i / kSamples;   // -0.4 .. 2.0 eV
+        energies.push_back(static_cast<float>(E));
+
+        dos_c.push_back(E > Ec ? static_cast<float>(std::sqrt(E - Ec)) : 0.0f);
+        dos_v.push_back(E < Ev ? static_cast<float>(std::sqrt(Ev - E)) : 0.0f);
+        alpha.push_back(E > Eg
+            ? std::pow(static_cast<float>(E - Eg), p) : 0.0f);
+    }
+
+    const float plotH = ImGui::GetContentRegionAvail().y * 0.5f;
+
+    if (ImPlot::BeginPlot("##DOS", ImVec2(-1.0f, plotH))) {
+        ImPlot::SetupAxes("E [eV]", "g(E) [a.u.]",
+                          ImPlotAxisFlags_AutoFit, ImPlotAxisFlags_AutoFit);
+        ImPlot::PlotLine("g_c (CB)", energies.data(), dos_c.data(), kSamples + 1);
+        ImPlot::PlotLine("g_v (VB)", energies.data(), dos_v.data(), kSamples + 1);
+        ImPlot::EndPlot();
+    }
+
+    if (ImPlot::BeginPlot("##absorption", ImVec2(-1.0f, -1.0f))) {
+        ImPlot::SetupAxes("hv [eV]", "alpha(hv) [a.u.]",
+                          ImPlotAxisFlags_AutoFit, ImPlotAxisFlags_AutoFit);
+        ImPlot::PlotLine("absorption", energies.data(), alpha.data(),
+                         kSamples + 1);
+        ImPlot::EndPlot();
+    }
+
+    ImGui::End();
+}
+
+
+// =============================================================================
+// I-V Curve window  (BJT Gummel + output characteristic)
+// -----------------------------------------------------------------------------
+// In bulk mode this window stays empty (with a tooltip-only explanation);
+// in NPN BJT mode it plots:
+//   * a Gummel-style I_C(V_BE) sweep using the engine's emitter-injection
+//     model and the current V_CE,
+//   * the operating-point marker showing where the user's sliders sit.
+//
+// Like the spectrum window, the buffers are static and reused frame to
+// frame. push_back never reallocates after the first call.
+// =============================================================================
+void drawIVCurveWindow(const DriftDiffusion& dd) {
+    if (!ImGui::Begin("I-V Curve")) { ImGui::End(); return; }
+
+    if (dd.deviceMode() != DeviceMode::NpnBjt) {
+        ImGui::TextDisabled(
+            "Switch Device mode to NPN BJT to see the I-V characteristics.");
+        ImGui::End();
+        return;
+    }
+
+    static std::vector<float> vbe;
+    static std::vector<float> ic;
+
+    constexpr int kSamples = 100;
+    if (vbe.capacity() < kSamples + 1) {
+        vbe.reserve(kSamples + 1);
+        ic .reserve(kSamples + 1);
+    }
+    vbe.clear();
+    ic .clear();
+
+    constexpr float kT_eV = 0.02585f;
+    const float V_CE = dd.vCE();
+
+    for (int i = 0; i <= kSamples; ++i) {
+        const float v = i * 0.01f;            // 0 .. 1.0 V
+        const float arg = std::clamp(v / kT_eV, 0.0f, 25.0f);
+        const float n_e = 0.6f * std::exp(arg);
+        // Same proxy formula as DriftDiffusion::applyBjtBoundaries.
+        const float current = n_e * (V_CE * 0.03f);
+        vbe.push_back(v);
+        ic .push_back(std::max(current, 1.0e-12f));   // floor for log axis
+    }
+
+    if (ImPlot::BeginPlot("##gummel", ImVec2(-1.0f, -1.0f))) {
+        ImPlot::SetupAxes("V_BE [V]", "I_C [a.u.]",
+                          ImPlotAxisFlags_AutoFit, ImPlotAxisFlags_AutoFit);
+        ImPlot::SetupAxisScale(ImAxis_Y1, ImPlotScale_Log10);
+        ImPlot::PlotLine("I_C(V_BE)", vbe.data(), ic.data(), kSamples + 1);
+
+        const float opx[1] = { dd.vBE() };
+        const float opy[1] = { std::max(dd.collectorCurrent(), 1.0e-12f) };
+        ImPlot::PlotScatter("Operating point", opx, opy, 1);
+
+        ImPlot::EndPlot();
+    }
     ImGui::End();
 }
 
@@ -663,16 +914,26 @@ void drawBandViewWindow(const BandView& view) {
 // =============================================================================
 // Drift-Diffusion inspection
 // =============================================================================
-void drawDriftDiffusionWindow(const DriftDiffusion& dd) {
-    if (!ImGui::Begin("Drift-Diffusion / Thermal")) { ImGui::End(); return; }
+void drawCrystalInfoWindow(const DriftDiffusion& dd) {
+    if (!ImGui::Begin("Crystal Info")) { ImGui::End(); return; }
 
     ImGui::SeparatorText("Carrier grid (n)");
+    HelpMarker(
+        "Solves  dn/dt = D nabla^2 n + G(x,y) - n / tau  on a 2D grid via "
+        "explicit FTCS with a per-step CFL clamp. Reflective Neumann at the "
+        "walls (BJT contacts override this with Dirichlet boundaries).");
     ImGui::Text("Grid:       %d x %d", dd.width(), dd.height());
     ImGui::Text("n_mean:     %.4f  (a.u.)", dd.meanValue());
     ImGui::Text("n_peak:     %.4f  (a.u.)", dd.maxValue());
     ImGui::Text("Equiv. dN:  %.3e cm^-3",   dd.globalExcess());
 
     ImGui::SeparatorText("Thermal grid (T)");
+    HelpMarker(
+        "Solves the heat equation\n"
+        "  rho Cp dT/dt = kappa nabla^2 T + H_Joule + H_recomb\n"
+        "with Dirichlet edges T = T_ambient (heat-sink contacts). Heat "
+        "sources couple electrothermally: more current -> more H_Joule -> "
+        "warmer cells -> smaller E_g -> more carriers (the runaway loop).");
     ImGui::Text("T_amb:      %8.2f K", dd.ambientTemperature());
     ImGui::Text("T_mean:     %8.2f K", dd.meanTemperature());
     ImGui::Text("T_peak:     %8.2f K", dd.maxTemperature());
@@ -685,13 +946,6 @@ void drawDriftDiffusionWindow(const DriftDiffusion& dd) {
         ImGui::Text("I_C (proxy):%.3e a.u.", dd.collectorCurrent());
     }
 
-    ImGui::Separator();
-    ImGui::TextWrapped(
-        "Carriers: dn/dt = D nabla^2 n + G(x,y) - n / tau\n"
-        "Heat:     rho Cp dT/dt = kappa nabla^2 T + H_Joule + H_recomb\n"
-        "Click on the Crystal View to deposit a Gaussian source. In BJT "
-        "mode, V_BE injects electrons from the emitter; V_CE sweeps them "
-        "into the collector and dissipates Joule heat in the active path.");
     ImGui::End();
 }
 
@@ -714,7 +968,7 @@ int main() {
     }
     ImPlot::CreateContext();
     enableImGuiDocking();
-    applyDarkStyle();
+    applyLightStyle();
 
     sf::Font font;
     (void)loadFont(font);
@@ -731,7 +985,8 @@ int main() {
 
     UIState   ui;
     sf::Clock clock;
-    bool      running = true;
+    bool      running             = true;
+    bool      requestResetLayout  = false;
 
     while (running && window.isOpen()) {
         // ---- Event handling -----------------------------------------------
@@ -773,19 +1028,21 @@ int main() {
         // ---- ImGui frame --------------------------------------------------
         ImGui::SFML::Update(window, delta);
 
-        beginDockspaceHost();
-        drawMenuBar(running, ui, *physics, *dd);
+        (void)beginDockspaceHost(requestResetLayout);
+        drawMenuBar(running, ui, *physics, *dd, requestResetLayout);
         ImGui::End();   // close DockHost
 
-        drawControlsWindow(*physics, *dd, ui);
-        drawReadoutsWindow(*physics, *dd);
-        drawLiveOscilloscope(*physics, dt);
+        drawControlsWindow   (*physics, *dd, ui);
+        drawReadoutsWindow   (*physics, *dd);
+        drawLiveOscilloscope (*physics, dt);
+        drawSpectrumWindow   (*physics);
+        drawIVCurveWindow    (*dd);
         drawCrystalViewWindow(*crystal, *dd, *physics, ui);
-        drawBandViewWindow(*bands);
-        drawDriftDiffusionWindow(*dd);
+        drawBandViewWindow   (*bands);
+        drawCrystalInfoWindow(*dd);
 
         // ---- Final composite ---------------------------------------------
-        window.clear(sf::Color(15, 18, 28));
+        window.clear(palette::WindowBg);
         ImGui::SFML::Render(window);
         window.display();
     }
