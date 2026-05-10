@@ -114,16 +114,28 @@ double PhysicsEngine::photonEnergyEv(double lambda_nm) noexcept {
 // =============================================================================
 // Static T-evaluators (used by per-cell electrothermal feedback and tests).
 //
-//   bandgapAt(mat, T)      = E_g(T)  via Varshni for `mat`
-//   intrinsicCarrierAt     = sqrt(Nc(T) * Nv(T)) * exp(-E_g(T) / 2kT)
+//   bandgapAt(mat, T)         = E_g(T)  via Varshni for `mat`           [eV]
+//   intrinsicCarrierAt        = n_i = sqrt(Nc Nv) exp(-Eg/2kT)          [cm^-3]
+//   log10IntrinsicCarrierAt   = log10 n_i  (numerically stable form)
+//
+// Why a log-domain n_i evaluator?  At T = 10 K with Si the exponent
+// Eg/(2kT) ~ 678, so exp(-678) underflows to *exactly zero* in double
+// precision -- which makes downstream divisions blow up.  Computing
+// log10(n_i) directly side-steps the underflow:
+//
+//     log10(n_i) = 0.5 * log10(Nc Nv) - 0.4342945 * Eg / (2 kT)
+//
+// Callers that only need the magnitude (graph axes, freeze-out
+// thresholds, ...) can use this instead of intrinsicCarrierAt() and
+// avoid silent zeros.
 // =============================================================================
 double PhysicsEngine::bandgapAt(const material::Profile& mat, double T) noexcept {
     if (T < 1.0) T = 1.0;
     return mat.Eg0 - (mat.varshni_a * T * T) / (T + mat.varshni_b);
 }
 
-double PhysicsEngine::intrinsicCarrierAt(const material::Profile& mat,
-                                         double T) noexcept
+double PhysicsEngine::log10IntrinsicCarrierAt(const material::Profile& mat,
+                                              double T) noexcept
 {
     if (T < 1.0) T = 1.0;
     const double Eg    = bandgapAt(mat, T);
@@ -131,7 +143,184 @@ double PhysicsEngine::intrinsicCarrierAt(const material::Profile& mat,
     const double Nc    = mat.Nc_300K * T_3_2;
     const double Nv    = mat.Nv_300K * T_3_2;
     const double kT    = phys::k_B * T;
-    return std::sqrt(Nc * Nv) * std::exp(-Eg / (2.0 * kT));
+    constexpr double kLn10Inv = 0.43429448190325176;     // 1 / ln(10)
+    return 0.5 * std::log10(Nc * Nv) - kLn10Inv * (Eg / (2.0 * kT));
+}
+
+double PhysicsEngine::intrinsicCarrierAt(const material::Profile& mat,
+                                         double T) noexcept
+{
+    const double l10 = log10IntrinsicCarrierAt(mat, T);
+    // IEEE754 double range: [~1e-308, ~1e+308].  Below ~1e-300 the
+    // result is unrepresentable; pin to zero rather than letting a
+    // denormalised tail leak into the rest of the pipeline.
+    if (l10 < -300.0) return 0.0;
+    if (l10 >  300.0) return std::numeric_limits<double>::infinity();
+    return std::pow(10.0, l10);
+}
+
+
+// =============================================================================
+// Caughey-Thomas high-field saturation
+//
+//   v(E) = mu_low * E / [1 + (mu_low * E / v_sat)^beta]^(1/beta)
+//   mu_eff(E) = v(E) / E
+//
+// Reference: Caughey & Thomas, Proc. IEEE 55 (1967), tabulated in Sze
+// "Physics of Semiconductor Devices" Sec. 1.5.4.
+//
+// At E -> 0: mu_eff -> mu_low
+// At E -> inf: v -> v_sat (the limiting drift speed at high fields)
+// =============================================================================
+double PhysicsEngine::highFieldMobility(double mu_low,
+                                        double E_field_V_per_cm,
+                                        double v_sat_cm_per_s,
+                                        double beta) noexcept
+{
+    if (E_field_V_per_cm <= 0.0) return mu_low;
+    if (v_sat_cm_per_s   <= 0.0) return mu_low;
+
+    const double r   = (mu_low * E_field_V_per_cm) / v_sat_cm_per_s;
+    const double rb  = std::pow(r, beta);
+    const double den = std::pow(1.0 + rb, 1.0 / beta);
+    return mu_low / den;     // = v(E)/E
+}
+
+
+// =============================================================================
+// Shockley-Read-Hall recombination through midgap traps.
+//
+//   R = (n p - n_i^2) / [tau_p (n + n_t) + tau_n (p + p_t)]
+//
+// We assume midgap traps  (E_t == E_i)  =>  n_t = p_t = n_i, so
+//
+//   R = (n p - n_i^2) / [tau_p (n + n_i) + tau_n (p + n_i)]
+//
+// Note: in equilibrium  n p = n_i^2  =>  R = 0,  satisfying detailed
+// balance automatically.  The simple "n / tau" form used elsewhere
+// violates this in equilibrium.
+//
+// Reference: Pierret, "Semiconductor Device Fundamentals" Ch. 5;
+// Sze Sec. 1.5.5.
+// =============================================================================
+double PhysicsEngine::recombSRH(double n, double p, double n_i,
+                                double tau_n, double tau_p) noexcept
+{
+    if (tau_n <= 0.0 || tau_p <= 0.0) return 0.0;
+    const double num = n * p - n_i * n_i;
+    const double den = tau_p * (n + n_i) + tau_n * (p + n_i);
+    if (den <= 0.0) return 0.0;
+    return num / den;
+}
+
+
+// =============================================================================
+// Bandgap narrowing (Slotboom & de Graaff, Solid-State Electronics 19 (1976))
+//
+//   dE_g(N) = E_BGN * [ ln(N / N_ref) + sqrt(ln^2(N / N_ref) + 0.5) ]
+//
+// with E_BGN = 9 meV and N_ref = 1e17 cm^-3 -- the canonical fit for Si.
+//
+// For N below N_ref the function is essentially zero; for N >= 1e18 it
+// becomes significant and depresses the *effective* intrinsic carrier
+// to n_ie = n_i * exp(dE_g / 2kT). This matters for both Fermi level
+// placement and BJT injection efficiency.
+// =============================================================================
+double PhysicsEngine::bandgapNarrowing(double N_per_cm3) noexcept {
+    if (N_per_cm3 <= 0.0) return 0.0;
+    constexpr double E_BGN = 9.0e-3;        // eV
+    constexpr double N_ref = 1.0e17;        // cm^-3
+    const double x = std::log(N_per_cm3 / N_ref);
+    const double term = x + std::sqrt(x * x + 0.5);
+    return std::max(0.0, E_BGN * term);
+}
+
+double PhysicsEngine::effectiveIntrinsicCarrier(const material::Profile& mat,
+                                                double T,
+                                                double N_per_cm3) noexcept
+{
+    if (T < 1.0) T = 1.0;
+    const double ni     = intrinsicCarrierAt(mat, T);
+    const double dEg    = bandgapNarrowing(N_per_cm3);
+    const double kT     = phys::k_B * T;
+    return ni * std::exp(dEg / (2.0 * kT));
+}
+
+
+// =============================================================================
+// Optical absorption (Tauc-style for direct vs indirect bandgap).
+//
+//   alpha(hv) = A * (hv - E_g)^p / hv      [cm^-1]
+//
+// with p = 1/2 for direct allowed transitions (GaAs) and p = 2 for
+// indirect transitions (Si, Ge). The 1/hv prefactor follows from the
+// Joint Density of States derivation (Pankove Ch. 3).
+//
+// The amplitude A is calibrated so that mid-visible (hv ~ 2.5 eV) gives
+// a textbook absorption coefficient (~ 1e4 /cm for Si, ~ 1e5 /cm for GaAs)
+// without requiring per-material lookup tables.
+// =============================================================================
+double PhysicsEngine::absorptionCoefficient(const material::Profile& mat,
+                                            double photon_eV) noexcept
+{
+    const double Eg = bandgapAt(mat, 300.0);
+    if (photon_eV <= Eg) return 0.0;
+
+    const double excess = photon_eV - Eg;
+    const double p      = mat.isDirectBandgap ? 0.5 : 2.0;
+    // Calibrated against textbook tables (Sze App. C, Pankove Ch. 3):
+    //   Si  at 2.5 eV  ->  alpha ~  1e4 /cm
+    //   GaAs at 2.5 eV ->  alpha ~  4e4 /cm
+    // The direct-gap material is several times more absorbing in the
+    // visible, even though its bandgap is wider than Si's.
+    const double A = mat.isDirectBandgap ? 1.0e5 : 1.0e4;
+    return A * std::pow(excess, p) / photon_eV;
+}
+
+double PhysicsEngine::penetrationDepthCm(const material::Profile& mat,
+                                         double photon_eV) noexcept
+{
+    const double a = absorptionCoefficient(mat, photon_eV);
+    if (a <= 0.0) return std::numeric_limits<double>::infinity();
+    return 1.0 / a;
+}
+
+
+// =============================================================================
+// BJT (NPN, one-sided emitter junction).
+//
+// Emitter injection efficiency (Sze Sec. 5.2):
+//
+//   gamma = 1 / (1 + (D_p N_B W_E) / (D_n N_E W_B))
+//
+// For a well-designed NPN, N_E >> N_B  =>  gamma -> 1.
+//
+// Common-emitter current gain:
+//
+//   beta = gamma * alpha_T / (1 - gamma * alpha_T)
+//
+// Early effect (base-width modulation):
+//
+//   I_C(V_CE) = I_C0 * (1 + V_CE / V_A)
+// =============================================================================
+double PhysicsEngine::bjtEmitterEfficiency(double D_n, double N_E, double W_E,
+                                           double D_p, double N_B, double W_B) noexcept
+{
+    if (D_n <= 0.0 || D_p <= 0.0) return 0.0;
+    if (N_E <= 0.0 || N_B <= 0.0) return 0.0;
+    if (W_E <= 0.0 || W_B <= 0.0) return 0.0;
+    const double ratio = (D_p * N_B * W_E) / (D_n * N_E * W_B);
+    return 1.0 / (1.0 + ratio);
+}
+
+double PhysicsEngine::bjtCurrentGain(double gamma, double alpha_T) noexcept {
+    const double a = std::clamp(gamma * alpha_T, 0.0, 0.99999);
+    return a / (1.0 - a);
+}
+
+double PhysicsEngine::earlyEffectFactor(double V_CE, double V_Early) noexcept {
+    if (V_Early <= 0.0) return 1.0;
+    return 1.0 + V_CE / V_Early;
 }
 
 

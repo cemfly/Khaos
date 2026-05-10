@@ -148,9 +148,15 @@ public:
     [[nodiscard]] bool exportCSV(const std::string& path) const;
 
     // ---- Static helpers (parameterized by material; testable directly) ----
+    //
+    // Numerically robust evaluators -- see PhysicsEngine.cpp for the
+    // log-domain implementation that survives T < 50 K (where the simple
+    // exp(-Eg/2kT) form underflows to zero in IEEE754).
     [[nodiscard]] static double bandgapAt(
         const material::Profile& mat, double T) noexcept;
     [[nodiscard]] static double intrinsicCarrierAt(
+        const material::Profile& mat, double T) noexcept;
+    [[nodiscard]] static double log10IntrinsicCarrierAt(
         const material::Profile& mat, double T) noexcept;
 
     // The N argument is the *ionized* impurity concentration -- which is
@@ -163,6 +169,54 @@ public:
         const material::Profile& mat, double T, double N_ionized) noexcept;
     [[nodiscard]] static double aroraMobilityElectron(double T, double N) noexcept;
     [[nodiscard]] static double aroraMobilityHole    (double T, double N) noexcept;
+
+    // Caughey-Thomas high-field saturation:
+    //   v(E) = mu_low * E / [1 + (mu_low * E / v_sat)^beta]^(1/beta)
+    // returned as the effective field-dependent mobility v(E)/E.
+    [[nodiscard]] static double highFieldMobility(
+        double mu_low, double E_field_V_per_cm,
+        double v_sat_cm_per_s, double beta) noexcept;
+
+    // Shockley-Read-Hall recombination through midgap traps:
+    //   R = (n p - n_i^2) / [tau_p (n + n_i) + tau_n (p + n_i)]
+    // (units: [cm^-3 / s])
+    [[nodiscard]] static double recombSRH(
+        double n, double p, double n_i,
+        double tau_n, double tau_p) noexcept;
+
+    // Slotboom-de Graaff bandgap narrowing -- significant for N > ~1e18.
+    //   dE_g = 9e-3 * [ln(N/N_ref) + sqrt(ln(N/N_ref)^2 + 0.5)]   eV
+    [[nodiscard]] static double bandgapNarrowing(double N_per_cm3) noexcept;
+
+    // Effective intrinsic carrier under heavy doping:  n_ie = n_i * exp(dE_g/2kT).
+    [[nodiscard]] static double effectiveIntrinsicCarrier(
+        const material::Profile& mat, double T, double N_per_cm3) noexcept;
+
+    // ---- Optical: Tauc-style absorption coefficient and penetration depth -
+    //
+    //   alpha(hv) = A * (hv - E_g)^p / hv         (p = 2 indirect, 1/2 direct)
+    //   penetration depth L_alpha = 1 / alpha
+    //
+    //   Reference: Pankove, "Optical Processes in Semiconductors" Ch. 3;
+    //   Sze App. C.
+    [[nodiscard]] static double absorptionCoefficient(
+        const material::Profile& mat, double photon_eV) noexcept;
+    [[nodiscard]] static double penetrationDepthCm(
+        const material::Profile& mat, double photon_eV) noexcept;
+
+    // ---- BJT (NPN, textbook one-sided emitter junction) -------------------
+    //
+    //   gamma  = 1 / (1 + (D_p N_B W_E) / (D_n N_E W_B))     (Sze 5.2)
+    //   alpha_T = 1 - W_B^2 / (2 L_n^2)                       (transport factor)
+    //   beta   = gamma * alpha_T / (1 - gamma * alpha_T)
+    //   I_C(V_CE) = I_C0 * (1 + V_CE / V_A)                   (Early effect)
+    [[nodiscard]] static double bjtEmitterEfficiency(
+        double D_n, double N_E, double W_E,
+        double D_p, double N_B, double W_B) noexcept;
+    [[nodiscard]] static double bjtCurrentGain(
+        double gamma, double alpha_T) noexcept;
+    [[nodiscard]] static double earlyEffectFactor(
+        double V_CE, double V_Early) noexcept;
 
     [[nodiscard]] static double photonEnergyEv(double lambda_nm) noexcept;
 

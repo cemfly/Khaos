@@ -1,7 +1,10 @@
 # =============================================================================
 # Semiconductor Analysis & Simulation Platform
+#
+#   Author : dex / cemfly-april2026
+#   License: MIT
 # -----------------------------------------------------------------------------
-# Phase 4 build:
+# Build dependencies:
 #   * SFML 3              -- windowing + 2D rendering
 #   * Dear ImGui (docking)-- dockable panels
 #   * ImGui-SFML v3       -- ImGui<->SFML 3 binding

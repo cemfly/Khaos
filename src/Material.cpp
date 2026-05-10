@@ -41,6 +41,19 @@ const Profile Silicon{
 
     .K_opt_excess      = 1.0e15,
 
+    // High-field saturation (Caughey-Thomas, tabulated in Sze 1.5.4).
+    .v_sat_n           = 1.07e7,     // cm/s
+    .v_sat_p           = 8.34e6,
+    .beta_n            = 2.0,
+    .beta_p            = 1.0,
+
+    // SRH lifetimes -- typical bulk float-zone Si (Pierret Ch. 5).
+    .tau_n             = 1.0e-3,     // s
+    .tau_p             = 1.0e-4,     // s (lower for holes due to common deep-level traps)
+
+    // Early voltage typical for a textbook NPN Si BJT.
+    .V_Early           = 75.0,       // V
+
     .kappa             = 1.50,       // W/(cm K)
     .rho_cp            = 1.65,       // J/(cm^3 K)
 
@@ -81,6 +94,21 @@ const Profile GalliumArsenide{
     // Direct-gap absorption is much stronger -> bigger K_opt.
     .K_opt_excess      = 1.0e16,
 
+    // GaAs displays negative differential mobility above ~3 kV/cm (Gunn);
+    // for the basic Caughey-Thomas form we still use a saturation velocity.
+    .v_sat_n           = 7.7e6,
+    .v_sat_p           = 9.0e6,
+    .beta_n            = 2.0,
+    .beta_p            = 1.0,
+
+    // Direct-gap GaAs is dominated by radiative recombination, which is
+    // captured here with a much shorter SRH lifetime than Si.
+    .tau_n             = 5.0e-9,     // s  (~ns regime)
+    .tau_p             = 5.0e-9,
+
+    // GaAs HBTs show very high V_A; pedagogical mid-range value.
+    .V_Early           = 80.0,
+
     .kappa             = 0.55,       // GaAs: ~3x lower than Si
     .rho_cp            = 1.74,
 
@@ -117,6 +145,17 @@ const Profile Germanium{
     .N_ref_matt        = 1.0e17,
 
     .K_opt_excess      = 5.0e15,
+
+    .v_sat_n           = 6.0e6,
+    .v_sat_p           = 6.0e6,
+    .beta_n            = 2.0,
+    .beta_p            = 1.0,
+
+    // Ge has a notably long minority-carrier lifetime in pure crystals.
+    .tau_n             = 5.0e-4,
+    .tau_p             = 5.0e-4,
+
+    .V_Early           = 50.0,
 
     .kappa             = 0.60,
     .rho_cp            = 1.65,

@@ -20,6 +20,7 @@
 //          Ioffe Physical-Technical Institute Si/GaAs/Ge handbook.
 // =============================================================================
 
+#include <concepts>
 #include <string_view>
 
 
@@ -76,6 +77,41 @@ struct Profile {
     //   under above-gap illumination is visually obvious next to Si.
     double K_opt_excess; // pedagogical pre-factor
 
+    // ---- High-field transport (Caughey-Thomas saturation) -----------------
+    //
+    //   v(E) = mu_low * E / [1 + (mu_low * E / v_sat)^beta]^(1/beta)
+    //
+    //   Phenomenological model from Caughey & Thomas, Proc. IEEE 55 (1967);
+    //   widely tabulated in Sze, "Physics of Semiconductor Devices" Sec. 1.5.4.
+    //   Si: v_sat,n ~= 1.07e7 cm/s (beta_n=2), v_sat,p ~= 8.34e6 (beta_p=1).
+    //   GaAs has negative differential mobility (Gunn effect) above ~3 kV/cm;
+    //   we keep the same form for pedagogical purposes.
+    double v_sat_n;       // [cm/s] electron saturation velocity
+    double v_sat_p;       // [cm/s] hole     saturation velocity
+    double beta_n;        // Caughey-Thomas exponent (electrons)
+    double beta_p;        // Caughey-Thomas exponent (holes)
+
+    // ---- SRH recombination lifetimes --------------------------------------
+    //
+    //   R_SRH = (np - n_i^2) / [tau_p (n + n_t) + tau_n (p + p_t)]
+    //
+    //   with n_t = n_i exp((E_t - E_i)/kT), p_t = n_i exp((E_i - E_t)/kT).
+    //   For midgap traps (E_t ~= E_i): n_t = p_t = n_i, simplifying to
+    //   R = (np - n_i^2) / [tau (n + p + 2 n_i)].
+    //
+    //   Pierret Ch. 5 / Sze Sec. 1.5.5. Lifetimes vary by orders of
+    //   magnitude across materials and crystal quality.
+    double tau_n;         // [s] electron SRH lifetime (typical bulk)
+    double tau_p;         // [s] hole     SRH lifetime
+
+    // ---- BJT-relevant (textbook NPN) --------------------------------------
+    //
+    //   Early voltage governs the slope of I_C vs V_CE in the active region:
+    //   I_C(V_CE) = I_C0 * (1 + V_CE / V_A).  A large V_A means a flat
+    //   output characteristic (good current source); a small V_A signals
+    //   strong base-width modulation. Sze Sec. 5.2.
+    double V_Early;       // [V] typical Early voltage for an NPN BJT
+
     // ---- Thermal (2D heat-equation solver) --------------------------------
     //
     //   Fourier's law of heat conduction:
@@ -122,5 +158,28 @@ inline constexpr int  kCount        = 3;
 inline constexpr const char* kLabels[kCount] = { "Silicon (Si)",
                                                   "Gallium Arsenide (GaAs)",
                                                   "Germanium (Ge)" };
+
+
+// =============================================================================
+// C++20 concept -- compile-time validation of "anything that looks like a
+// semiconductor material profile". Static helpers in PhysicsEngine accept
+// types that satisfy this concept, so a wrong-type argument fails to compile
+// with a clear "constraint not satisfied" diagnostic instead of opaque
+// member-access errors.
+// =============================================================================
+template <typename T>
+concept SemiconductorProfile = requires(const T& t) {
+    { t.Eg0              } -> std::convertible_to<double>;
+    { t.varshni_a        } -> std::convertible_to<double>;
+    { t.varshni_b        } -> std::convertible_to<double>;
+    { t.Nc_300K          } -> std::convertible_to<double>;
+    { t.Nv_300K          } -> std::convertible_to<double>;
+    { t.isDirectBandgap  } -> std::convertible_to<bool>;
+    { t.v_sat_n          } -> std::convertible_to<double>;
+    { t.tau_n            } -> std::convertible_to<double>;
+};
+
+// Sanity: Profile itself must satisfy the concept it advertises.
+static_assert(SemiconductorProfile<Profile>);
 
 } // namespace material

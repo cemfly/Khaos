@@ -104,9 +104,7 @@ inline constexpr float kImGuiFontSizePx = 17.0f;
 
 // Loads the same TTF that SFML used into ImGui at a larger point size.
 // Falls back to ImGui's built-in pixel font if no TTF is available.
-void loadImGuiFont(sf::RenderWindow& window,
-                   const std::filesystem::path& fontPath)
-{
+void loadImGuiFont(const std::filesystem::path& fontPath) {
     ImGuiIO& io = ImGui::GetIO();
     io.Fonts->Clear();
 
@@ -118,7 +116,7 @@ void loadImGuiFont(sf::RenderWindow& window,
     }
     if (!ok) io.Fonts->AddFontDefault();
 
-    (void)ImGui::SFML::UpdateFontTexture(window);
+    (void)ImGui::SFML::UpdateFontTexture();
 }
 
 
@@ -351,6 +349,9 @@ struct UIState {
     float       V_BE = 0.0f;
     float       V_CE = 0.0f;
 
+    // High-field transport (read-only Caughey-Thomas evaluator).
+    float       E_field_V_per_cm = 0.0f;
+
     std::string statusMessage;
     sf::Clock   statusClock;
     float       statusLifetime = 0.0f;
@@ -554,6 +555,41 @@ void drawControlsWindow(PhysicsEngine& physics,
             "the Lorentz force F = q(v x B) on free carriers (visible as "
             "opposite curl directions for electrons vs holes) and sets the "
             "sign / magnitude of the Hall coefficient R_H.");
+    }
+
+    // =====================================================================
+    // High-field transport  (Caughey-Thomas saturation)
+    // =====================================================================
+    if (ImGui::CollapsingHeader("High-field transport"))
+    {
+        ImGui::SliderFloat("E-field [V/cm]", &ui.E_field_V_per_cm,
+                           0.0f, 1.0e6f, "%.2e",
+                           ImGuiSliderFlags_Logarithmic);
+        HelpMarker(
+            "Caughey-Thomas saturation:\n"
+            "  v(E) = mu_low * E / [1 + (mu_low E / v_sat)^beta]^(1/beta)\n"
+            "At low fields the carrier velocity is linear in E; above\n"
+            "~v_sat / mu_low (~10 kV/cm in Si), the velocity saturates\n"
+            "near v_sat (~1e7 cm/s). Sze Sec. 1.5.4.");
+
+        const auto& mat   = physics.getMaterial();
+        const double mu_n = physics.getElectronMobility();
+        const double mu_p = physics.getHoleMobility();
+        const double E    = ui.E_field_V_per_cm;
+
+        const double mu_n_E = PhysicsEngine::highFieldMobility(
+            mu_n, E, mat.v_sat_n, mat.beta_n);
+        const double mu_p_E = PhysicsEngine::highFieldMobility(
+            mu_p, E, mat.v_sat_p, mat.beta_p);
+        const double v_n = mu_n_E * E;
+        const double v_p = mu_p_E * E;
+
+        ImGui::TextDisabled("mu_n(E) = %.1f  cm^2/Vs   v_n = %.2e cm/s",
+                            mu_n_E, v_n);
+        ImGui::TextDisabled("mu_p(E) = %.1f  cm^2/Vs   v_p = %.2e cm/s",
+                            mu_p_E, v_p);
+        ImGui::TextDisabled("v_sat,n = %.2e   v_sat,p = %.2e   (cm/s)",
+                            mat.v_sat_n, mat.v_sat_p);
     }
 
     // =====================================================================
@@ -829,25 +865,27 @@ void drawSpectrumWindow(const PhysicsEngine& physics) {
     static std::vector<float> energies;
     static std::vector<float> dos_c;
     static std::vector<float> dos_v;
-    static std::vector<float> alpha;
+    static std::vector<float> alpha_curve;
+    static std::vector<float> depth_um;
 
     constexpr int kSamples = 200;
     if (energies.capacity() < kSamples + 1) {
-        energies.reserve(kSamples + 1);
-        dos_c   .reserve(kSamples + 1);
-        dos_v   .reserve(kSamples + 1);
-        alpha   .reserve(kSamples + 1);
+        energies   .reserve(kSamples + 1);
+        dos_c      .reserve(kSamples + 1);
+        dos_v      .reserve(kSamples + 1);
+        alpha_curve.reserve(kSamples + 1);
+        depth_um   .reserve(kSamples + 1);
     }
-    energies.clear();
-    dos_c   .clear();
-    dos_v   .clear();
-    alpha   .clear();
+    energies   .clear();
+    dos_c      .clear();
+    dos_v      .clear();
+    alpha_curve.clear();
+    depth_um   .clear();
 
     const auto& mat = physics.getMaterial();
     const double Eg = physics.getBandgap();
     const double Ec = Eg;
     const double Ev = 0.0;
-    const float  p  = mat.isDirectBandgap ? 0.5f : 1.0f;
 
     for (int i = 0; i <= kSamples; ++i) {
         const double E = -0.4 + 2.4 * i / kSamples;   // -0.4 .. 2.0 eV
@@ -855,11 +893,20 @@ void drawSpectrumWindow(const PhysicsEngine& physics) {
 
         dos_c.push_back(E > Ec ? static_cast<float>(std::sqrt(E - Ec)) : 0.0f);
         dos_v.push_back(E < Ev ? static_cast<float>(std::sqrt(Ev - E)) : 0.0f);
-        alpha.push_back(E > Eg
-            ? std::pow(static_cast<float>(E - Eg), p) : 0.0f);
+
+        // Real cm^-1 absorption coefficient + penetration depth in um.
+        const double a = PhysicsEngine::absorptionCoefficient(mat, E);
+        alpha_curve.push_back(static_cast<float>(a));
+        if (a > 0.0) {
+            // L_alpha = 1/alpha [cm] -> convert to micrometers.
+            const double L_um = (1.0 / a) * 1.0e4;
+            depth_um.push_back(static_cast<float>(std::min(L_um, 1.0e6)));
+        } else {
+            depth_um.push_back(1.0e6f);   // off-scale at sub-gap photons
+        }
     }
 
-    const float plotH = ImGui::GetContentRegionAvail().y * 0.5f;
+    const float plotH = ImGui::GetContentRegionAvail().y * 0.33f;
 
     if (ImPlot::BeginPlot("##DOS", ImVec2(-1.0f, plotH))) {
         ImPlot::SetupAxes("E [eV]", "g(E) [a.u.]",
@@ -869,11 +916,21 @@ void drawSpectrumWindow(const PhysicsEngine& physics) {
         ImPlot::EndPlot();
     }
 
-    if (ImPlot::BeginPlot("##absorption", ImVec2(-1.0f, -1.0f))) {
-        ImPlot::SetupAxes("hv [eV]", "alpha(hv) [a.u.]",
+    if (ImPlot::BeginPlot("##absorption", ImVec2(-1.0f, plotH))) {
+        ImPlot::SetupAxes("hv [eV]", "alpha [cm^-1]",
                           ImPlotAxisFlags_AutoFit, ImPlotAxisFlags_AutoFit);
-        ImPlot::PlotLine("absorption", energies.data(), alpha.data(),
+        ImPlot::SetupAxisScale(ImAxis_Y1, ImPlotScale_Log10);
+        ImPlot::PlotLine("alpha(hv)", energies.data(), alpha_curve.data(),
                          kSamples + 1);
+        ImPlot::EndPlot();
+    }
+
+    if (ImPlot::BeginPlot("##penetration", ImVec2(-1.0f, -1.0f))) {
+        ImPlot::SetupAxes("hv [eV]", "L_alpha [um]",
+                          ImPlotAxisFlags_AutoFit, ImPlotAxisFlags_AutoFit);
+        ImPlot::SetupAxisScale(ImAxis_Y1, ImPlotScale_Log10);
+        ImPlot::PlotLine("penetration depth",
+                         energies.data(), depth_um.data(), kSamples + 1);
         ImPlot::EndPlot();
     }
 
@@ -960,7 +1017,9 @@ void drawBandViewWindow(const BandView& view) {
 // =============================================================================
 // Drift-Diffusion inspection
 // =============================================================================
-void drawCrystalInfoWindow(const DriftDiffusion& dd) {
+void drawCrystalInfoWindow(const DriftDiffusion& dd,
+                           const PhysicsEngine& physics)
+{
     if (!ImGui::Begin("Crystal Info")) { ImGui::End(); return; }
 
     ImGui::SeparatorText("Carrier grid (n)");
@@ -972,6 +1031,27 @@ void drawCrystalInfoWindow(const DriftDiffusion& dd) {
     ImGui::Text("n_mean:     %.4f  (a.u.)", dd.meanValue());
     ImGui::Text("n_peak:     %.4f  (a.u.)", dd.maxValue());
     ImGui::Text("Equiv. dN:  %.3e cm^-3",   dd.globalExcess());
+
+    // Bulk Shockley-Read-Hall recombination rate, computed from the global
+    // n / p / n_i and the material's tau_n / tau_p:
+    //
+    //   R_SRH = (np - n_i^2) / [tau_p (n + n_i) + tau_n (p + n_i)]
+    //
+    // (Pierret Ch. 5, Sze Sec. 1.5.5). In thermal equilibrium np = n_i^2
+    // and R_SRH = 0; under injection or illumination it becomes positive.
+    {
+        const auto& mat = physics.getMaterial();
+        const double R = PhysicsEngine::recombSRH(
+            physics.getTotalElectronConc(),
+            physics.getTotalHoleConc(),
+            physics.getIntrinsicCarrier(),
+            mat.tau_n, mat.tau_p);
+        ImGui::Text("R_SRH:      %.3e cm^-3 / s", R);
+        HelpMarker(
+            "Net Shockley-Read-Hall recombination rate using the material's "
+            "tau_n, tau_p. Detailed balance: equals zero in thermal "
+            "equilibrium, positive when np > n_i^2 (injection / illumination).");
+    }
 
     ImGui::SeparatorText("Thermal grid (T)");
     HelpMarker(
@@ -990,6 +1070,41 @@ void drawCrystalInfoWindow(const DriftDiffusion& dd) {
         ImGui::Text("V_BE:       %5.3f V", dd.vBE());
         ImGui::Text("V_CE:       %5.3f V", dd.vCE());
         ImGui::Text("I_C (proxy):%.3e a.u.", dd.collectorCurrent());
+
+        // ---- Figures of merit derived from material + region geometry ----
+        // Grid topology: emitter spans 22% of grid width; base 8%; the
+        // remainder is collector. Physical width is taken as 1 um per cell
+        // (standard textbook BJT scale).
+        const auto& mat = physics.getMaterial();
+        constexpr double cell_um = 1.0;
+        const double W_E = dd.width() * 0.22 * cell_um * 1.0e-4;   // cm
+        const double W_B = dd.width() * 0.08 * cell_um * 1.0e-4;
+        constexpr double N_E = 1.0e19;     // typical heavy emitter
+        constexpr double N_B = 1.0e16;     // typical base
+        const double T = physics.getTemperature();
+        const double D_n = mat.mu_L_n_300 * phys::k_B * T;   // Einstein
+        const double D_p = mat.mu_L_p_300 * phys::k_B * T;
+        const double L_n = std::sqrt(D_n * mat.tau_n);
+        const double alpha_T_factor = std::clamp(
+            1.0 - 0.5 * (W_B / L_n) * (W_B / L_n), 0.0, 0.99999);
+        const double gamma_eff = PhysicsEngine::bjtEmitterEfficiency(
+            D_n, N_E, W_E, D_p, N_B, W_B);
+        const double beta_dc   = PhysicsEngine::bjtCurrentGain(
+            gamma_eff, alpha_T_factor);
+        const double early_fac = PhysicsEngine::earlyEffectFactor(
+            dd.vCE(), mat.V_Early);
+
+        ImGui::SeparatorText("BJT figures of merit");
+        ImGui::Text("gamma:    %.5f",          gamma_eff);
+        ImGui::Text("alpha_T:  %.5f",          alpha_T_factor);
+        ImGui::Text("beta_DC:  %.1f",          beta_dc);
+        ImGui::Text("V_Early:  %.1f V",        mat.V_Early);
+        ImGui::Text("I_C/I_C0: %.3f (Early)",  early_fac);
+        HelpMarker(
+            "gamma = 1/(1 + D_p N_B W_E / D_n N_E W_B)   (emitter efficiency)\n"
+            "alpha_T = 1 - W_B^2 / (2 L_n^2)             (transport factor)\n"
+            "beta_DC = gamma alpha_T / (1 - gamma alpha_T)\n"
+            "Early factor = 1 + V_CE / V_A");
     }
 
     ImGui::End();
@@ -1019,7 +1134,7 @@ int main() {
     sf::Font font;
     std::filesystem::path fontPath;
     (void)loadFont(font, fontPath);
-    loadImGuiFont(window, fontPath);
+    loadImGuiFont(fontPath);
 
     auto physics = std::make_unique<PhysicsEngine>(material::Kind::Silicon);
     auto dd      = std::make_unique<DriftDiffusion>(60, 40);
@@ -1087,7 +1202,7 @@ int main() {
         drawIVCurveWindow    (*dd);
         drawCrystalViewWindow(*crystal, *dd, *physics, ui);
         drawBandViewWindow   (*bands);
-        drawCrystalInfoWindow(*dd);
+        drawCrystalInfoWindow(*dd, *physics);
 
         // ---- Final composite ---------------------------------------------
         window.clear(palette::WindowBg);
