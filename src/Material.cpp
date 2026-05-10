@@ -57,6 +57,24 @@ const Profile Silicon{
     .kappa             = 1.50,       // W/(cm K)
     .rho_cp            = 1.65,       // J/(cm^3 K)
 
+    .epsilon_r         = 11.7,
+
+    // Auger (Dziewior & Schmid 1977)
+    .C_n_aug           = 2.8e-31,
+    .C_p_aug           = 9.9e-32,
+
+    // Chynoweth (Van Overstraeten - de Man 1970, simplified m=1)
+    .alpha_inf_n       = 7.030e5,
+    .alpha_inf_p       = 1.582e6,
+    .E_crit_n          = 1.231e6,
+    .E_crit_p          = 2.036e6,
+    .chyn_m            = 1.0,
+
+    // BTBT (Kane indirect: P=5/2, B from Si data, Hurkx 1992)
+    .btbt_isDirect     = false,
+    .A_kane            = 3.5e21,
+    .B_kane            = 2.25e7,
+
     .atomR = 120, .atomG = 170, .atomB = 220,
 };
 
@@ -112,6 +130,27 @@ const Profile GalliumArsenide{
     .kappa             = 0.55,       // GaAs: ~3x lower than Si
     .rho_cp            = 1.74,
 
+    .epsilon_r         = 12.9,
+
+    // Auger -- direct-gap GaAs is dominated by radiative recomb, so the
+    // intrinsic Auger coefficients are much smaller in real life. The
+    // values below are pedagogically bumped so the heavily-doped emitter
+    // panel still reads a non-zero R_Aug for visualisation.
+    .C_n_aug           = 1.0e-30,
+    .C_p_aug           = 1.0e-30,
+
+    // Chynoweth (GaAs, Bulman/Williams 1985)
+    .alpha_inf_n       = 1.899e5,
+    .alpha_inf_p       = 2.215e5,
+    .E_crit_n          = 5.75e5,
+    .E_crit_p          = 6.57e5,
+    .chyn_m            = 1.82,
+
+    // BTBT direct gap: P=2 in Kane formula
+    .btbt_isDirect     = true,
+    .A_kane            = 1.0e20,
+    .B_kane            = 4.30e7,
+
     .atomR = 200, .atomG = 130, .atomB = 240,
 };
 
@@ -159,6 +198,24 @@ const Profile Germanium{
 
     .kappa             = 0.60,
     .rho_cp            = 1.65,
+
+    .epsilon_r         = 16.0,
+
+    // Auger (Conradt & Aengenheister 1972)
+    .C_n_aug           = 8.0e-32,
+    .C_p_aug           = 2.8e-31,
+
+    // Chynoweth (Mikawa et al 1980; Sze Tab. 2.1.5)
+    .alpha_inf_n       = 1.55e7,
+    .alpha_inf_p       = 1.00e7,
+    .E_crit_n          = 1.56e6,
+    .E_crit_p          = 1.28e6,
+    .chyn_m            = 1.0,
+
+    // BTBT (narrow-gap Ge -> very strong Zener)
+    .btbt_isDirect     = false,
+    .A_kane            = 1.6e22,
+    .B_kane            = 1.20e7,
 
     .atomR = 230, .atomG = 160, .atomB =  90,
 };

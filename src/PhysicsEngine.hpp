@@ -35,6 +35,7 @@ namespace phys {
     inline constexpr double h_eVs   = 4.135667696e-15;  // [eV s]
     inline constexpr double c_light = 2.99792458e8;     // [m/s]
     inline constexpr double hc_eVnm = 1239.84198;       // E[eV] = hc/lambda[nm]
+    inline constexpr double eps_0   = 8.854187817e-14;  // [F/cm] vacuum perm.
 
     inline constexpr double g_donor    = 2.0;           // donor degeneracy
     inline constexpr double g_acceptor = 4.0;           // acceptor degeneracy
@@ -219,6 +220,118 @@ public:
         double V_CE, double V_Early) noexcept;
 
     [[nodiscard]] static double photonEnergyEv(double lambda_nm) noexcept;
+
+    // -------------------------------------------------------------------
+    // Poisson / electrostatics helpers          [Phase 1: Poisson solver]
+    //
+    //   V_T = kT/q  (thermal voltage, [V]).  At 300 K, V_T ~ 0.02585 V.
+    //   Boltzmann statistics in equilibrium:
+    //       n(psi) = n_i exp(+psi / V_T)
+    //       p(psi) = n_i exp(-psi / V_T)
+    //   (Sze Eq. 1.20a-b; Pierret Eq. 4.27.)
+    // -------------------------------------------------------------------
+    [[nodiscard]] static constexpr double thermalVoltage(double T) noexcept {
+        return phys::k_B * T;
+    }
+    [[nodiscard]] static double equilibriumElectronDensity(
+        double n_i, double psi, double V_T) noexcept;
+    [[nodiscard]] static double equilibriumHoleDensity(
+        double n_i, double psi, double V_T) noexcept;
+    [[nodiscard]] static double builtInPotential(
+        double Nd, double Na, double n_i, double V_T) noexcept;
+    [[nodiscard]] static double debyeLengthCm(
+        double epsilon_r, double N_per_cm3, double V_T) noexcept;
+
+    // -------------------------------------------------------------------
+    // Non-equilibrium quasi-Fermi statistics       [Phase 3: Gummel solver]
+    //
+    //   n(x) = n_i exp[(psi(x) - phi_n(x)) / V_T]
+    //   p(x) = n_i exp[(phi_p(x) - psi(x)) / V_T]
+    //
+    // phi_n, phi_p are the electron / hole quasi-Fermi *potentials* (volts);
+    // in equilibrium phi_n = phi_p = const and the formulas reduce to the
+    // Boltzmann limit. Under bias they split inside the depletion region
+    // and pick up the contact potentials at the ohmic ends.
+    //
+    // Reference: Sze Eq. 1.44, Pierret Sec. 5.4.
+    // -------------------------------------------------------------------
+    [[nodiscard]] static double nonEqElectronDensity(
+        double n_i, double psi, double phi_n, double V_T) noexcept;
+    [[nodiscard]] static double nonEqHoleDensity(
+        double n_i, double psi, double phi_p, double V_T) noexcept;
+
+    // Ohmic-contact charge-neutral psi (Dirichlet BC for the Poisson
+    // equation under non-equilibrium):
+    //
+    //   n-contact :  psi_bc = V_metal + V_T * ln(Nd / n_i)
+    //   p-contact :  psi_bc = V_metal - V_T * ln(Na / n_i)
+    //
+    // Sze Eq. 2.7 / Selberherr Sec. 4.2. The metal voltage V_metal is
+    // 0 at the cathode and V_a at the anode by convention; phi_n and
+    // phi_p both equal V_metal at an ohmic contact (no Fermi splitting
+    // at the metal interface).
+    [[nodiscard]] static double ohmicContactPsi(
+        double V_metal, double Nd, double Na,
+        double n_i, double V_T) noexcept;
+
+    // -------------------------------------------------------------------
+    // Auger recombination       (three-particle, Sze Sec. 1.5.6)
+    //
+    //   R_Aug = (C_n n + C_p p) (n p - n_i^2)        [cm^-3 / s]
+    //
+    // Dominant for N > 1e18 cm^-3; the (np - ni^2) factor goes to zero
+    // in thermal equilibrium (detailed balance) and positive under
+    // injection.
+    // -------------------------------------------------------------------
+    [[nodiscard]] static double recombAuger(
+        double n, double p, double n_i,
+        double C_n, double C_p) noexcept;
+
+    // -------------------------------------------------------------------
+    // Chynoweth impact ionization        (Sze Sec. 2.4.2)
+    //
+    //   alpha(E) = alpha_inf * exp[-(E_crit / |E|)^m]    [cm^-1]
+    //
+    // alpha is the ionization coefficient: secondary EHPs created per cm
+    // of carrier travel along the field. Multiplication factor for a
+    // depletion region of width W under uniform field is approximated as
+    //
+    //   M = 1 / (1 - alpha_eff * W)
+    //
+    // and avalanche breakdown is signalled when M -> infinity. Here we
+    // expose alpha and M_factor separately so the UI can plot both.
+    //
+    // E_field is signed; the function uses |E| internally so this is
+    // safe to call directly with the Poisson-derived gradient.
+    // -------------------------------------------------------------------
+    [[nodiscard]] static double chynowethRate(
+        double E_field_V_per_cm,
+        double alpha_inf, double E_crit, double m) noexcept;
+
+    // Convenience: weighted ionization coefficient for an electron-hole
+    // pair drifting together (assumes electron-dominated multiplication
+    // unless alpha_p > alpha_n). A common pedagogical reduction.
+    [[nodiscard]] static double avalancheMultiplication(
+        double alpha_n, double alpha_p,
+        double depletion_width_cm) noexcept;
+
+    // -------------------------------------------------------------------
+    // Band-to-band tunneling -- Kane model    (Kane 1961, Sze Sec. 4.3)
+    //
+    //   G_BTBT(E) = A_kane * E^P * exp(-B_kane / E)     [cm^-3 / s]
+    //
+    //   P = 2  (direct gap)    P = 5/2  (indirect, phonon-assisted)
+    //
+    // Drives Zener breakdown in heavily doped, narrow-gap junctions
+    // (Ge, narrow-gap III-V). For Si, BTBT becomes appreciable only
+    // above ~1e6 V/cm.
+    //
+    // E_field is signed; the function uses |E| internally.
+    // -------------------------------------------------------------------
+    [[nodiscard]] static double kaneBTBT(
+        double E_field_V_per_cm,
+        double A_kane, double B_kane,
+        bool isDirect) noexcept;
 
 private:
     void recompute();

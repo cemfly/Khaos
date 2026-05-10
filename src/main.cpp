@@ -36,6 +36,7 @@
 #include <cstddef>
 #include <filesystem>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -283,9 +284,12 @@ void setupInitialDockLayout(ImGuiID dockspace_id, ImVec2 size) {
     //    same slot become tabs automatically.
     ImGui::DockBuilderDockWindow("Controls",          dock_left);
     ImGui::DockBuilderDockWindow("Crystal View",      dock_center_top);
+    ImGui::DockBuilderDockWindow("Device Painter",    dock_center_top);
+    ImGui::DockBuilderDockWindow("3D Topology",       dock_center_top);
     ImGui::DockBuilderDockWindow("Live Oscilloscope", dock_center_bottom);
     ImGui::DockBuilderDockWindow("Spectrum",          dock_center_bottom);
     ImGui::DockBuilderDockWindow("I-V Curve",         dock_center_bottom);
+    ImGui::DockBuilderDockWindow("Breakdown",         dock_center_bottom);
     ImGui::DockBuilderDockWindow("Band Diagram",      dock_right_top);
     ImGui::DockBuilderDockWindow("Readouts",          dock_right_bottom);
     ImGui::DockBuilderDockWindow("Crystal Info",      dock_right_bottom);
@@ -351,6 +355,40 @@ struct UIState {
 
     // High-field transport (read-only Caughey-Thomas evaluator).
     float       E_field_V_per_cm = 0.0f;
+
+    // -- Phase 1: Device Painter ------------------------------------------
+    BrushKind   currentBrush      = BrushKind::None;
+    int         brushRadius       = 3;
+    float       brushLogDose      = 17.0f;     // log10 cm^-3
+    bool        showDopingOverlay = true;
+
+    // -- Phase 1: Poisson solver ------------------------------------------
+    int         poissonIters      = 60;
+    float       poissonOmega      = 0.85f;
+    bool        poissonAutoSolve  = true;
+    double      poissonResidual   = 0.0;
+
+    // -- Phase 2: BandView spatial cut ------------------------------------
+    int         bandCutRow        = 20;        // j_row for sampleHorizontalCut
+    bool        bandSpatialMode   = true;
+
+    // -- Phase 2: Probe field for Chynoweth / BTBT readout ----------------
+    float       probeField        = 3.0e5f;    // V/cm
+    float       probeWidth_um     = 0.5f;      // depletion width for M factor
+
+    // -- Phase 3: Non-equilibrium / Gummel --------------------------------
+    float       V_bias            = 0.0f;      // applied anode bias [V]
+    bool        gummelEnable      = false;     // run Gummel each frame
+    int         gummelOuter       = 4;         // outer Poisson<->Continuity passes
+    int         gummelPoissonInner   = 25;
+    int         gummelContinuityInner = 15;
+    float       gummelOmegaPsi    = 0.85f;
+    float       gummelOmegaPhi    = 1.0f;
+    double      gummelResidual    = 0.0;
+    double      lastJ_terminal    = 0.0;       // A/cm^2
+
+    // -- Phase 3: 3D Topology window --------------------------------------
+    int         topo3DField       = 0;         // 0=psi, 1=n, 2=p, 3=|E|
 
     std::string statusMessage;
     sf::Clock   statusClock;
@@ -595,19 +633,25 @@ void drawControlsWindow(PhysicsEngine& physics,
     // =====================================================================
     // Device & BJT
     // =====================================================================
-    if (ImGui::CollapsingHeader("Device & BJT"))
+    if (ImGui::CollapsingHeader("Device Topology",
+                                ImGuiTreeNodeFlags_DefaultOpen))
     {
-        const char* devLabels[] = { "Bulk wafer", "NPN BJT" };
+        const char* devLabels[] = {
+            "Bulk wafer",
+            "NPN BJT (procedural)",
+            "Painter (custom + Poisson)",
+        };
         int dev = static_cast<int>(dd.deviceMode());
         if (ImGui::Combo("Device mode", &dev, devLabels, IM_ARRAYSIZE(devLabels)))
             dd.setDeviceMode(static_cast<DeviceMode>(dev));
         HelpMarker(
-            "Bulk: a single homogeneous wafer; click in the Crystal View to "
-            "deposit a Gaussian generation source.\n"
-            "NPN BJT: the grid is partitioned into Emitter | Base | Collector. "
-            "V_BE forward-biases the base-emitter junction (electron "
-            "injection); V_CE reverse-biases the collector and sweeps "
-            "carriers across the base.");
+            "Bulk: homogeneous wafer; click Crystal View to deposit a "
+            "Gaussian generation source.\n"
+            "NPN BJT: procedural Emitter/Base/Collector partition; V_BE "
+            "and V_CE drive the device.\n"
+            "Painter: open the 'Device Painter' window and brush N-/P-type "
+            "doping by hand. Equilibrium Poisson is solved on the painted "
+            "Nd, Na map every frame; Spatial BandView shows the bent bands.");
 
         if (dd.deviceMode() == DeviceMode::NpnBjt) {
             if (ImGui::SliderFloat("V_BE [V]", &ui.V_BE, 0.0f, 1.0f, "%.3f"))
@@ -625,6 +669,126 @@ void drawControlsWindow(PhysicsEngine& physics,
                 "path. Together with V_BE it defines the BJT operating "
                 "point (cut-off / forward-active / saturation).");
         }
+    }
+
+    // =====================================================================
+    // Poisson solver (Phase 1)
+    // =====================================================================
+    if (ImGui::CollapsingHeader("Poisson Solver"))
+    {
+        ImGui::Checkbox("Auto-solve (Painter mode)", &ui.poissonAutoSolve);
+        HelpMarker(
+            "Self-consistent equilibrium Poisson:\n"
+            "  eps_s grad^2 psi = -q (p - n + Nd - Na)\n"
+            "with n,p in the Boltzmann limit. Gauss-Seidel + under-"
+            "relaxation. Active in Painter mode only.\n"
+            "Sze Sec. 2.2 / Selberherr Ch. 5.");
+
+        ImGui::SliderInt  ("Iters / frame", &ui.poissonIters, 5, 400);
+        ImGui::SliderFloat("omega",         &ui.poissonOmega, 0.30f, 1.20f, "%.2f");
+
+        float pitch_um = dd.cellPitchCm() * 1.0e4f;
+        if (ImGui::SliderFloat("Cell pitch [um]", &pitch_um, 0.01f, 5.0f,
+                               "%.3f", ImGuiSliderFlags_Logarithmic)) {
+            dd.setCellPitchCm(pitch_um * 1.0e-4f);
+        }
+        HelpMarker(
+            "Physical pitch per cell. Smaller pitch -> sharper depletion "
+            "edges but slower Poisson relaxation. Rule of thumb: pitch < "
+            "L_D / 4 where L_D = sqrt(eps_s V_T / (q N)).");
+
+        if (ImGui::Button("Solve now (1000 iters)")) {
+            const auto& m = physics.getMaterial();
+            ui.poissonResidual = dd.solvePoisson(
+                physics.getIntrinsicCarrier(),
+                PhysicsEngine::thermalVoltage(physics.getTemperature()),
+                m.epsilon_r, 1000, ui.poissonOmega);
+            ui.flashStatus("Poisson 1000-sweep refinement done");
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Reset psi / clear paint")) {
+            dd.clearDoping();
+            ui.flashStatus("Doping & potential cleared");
+        }
+        ImGui::TextDisabled("L2 residual: %.3e V",   ui.poissonResidual);
+        ImGui::TextDisabled("|E| peak:    %.3e V/cm", dd.peakElectricField());
+
+        // Built-in potential for the *uniform* doping currently in the
+        // Material/Engine state. A useful sanity check next to the
+        // Poisson-derived V_bi shown in the spatial band view.
+        const auto&  m   = physics.getMaterial();
+        const double n_i = physics.getIntrinsicCarrier();
+        const double V_T = PhysicsEngine::thermalVoltage(physics.getTemperature());
+        const double L_D = PhysicsEngine::debyeLengthCm(
+            m.epsilon_r, std::max(physics.getDopingConcentration(), 1.0e10),
+            V_T);
+        ImGui::TextDisabled("V_T   = %.4f V", V_T);
+        ImGui::TextDisabled("L_D   = %.2e cm (~ %.1f um)", L_D, L_D * 1.0e4);
+    }
+
+    // =====================================================================
+    // Non-equilibrium / Gummel solver  [Phase 3]
+    // =====================================================================
+    if (ImGui::CollapsingHeader("Bias & Gummel (Non-equilibrium)"))
+    {
+        if (ImGui::SliderFloat("V_bias [V]", &ui.V_bias, -10.0f, 1.5f, "%.3f")) {
+            dd.setAppliedBias(ui.V_bias);
+        }
+        HelpMarker(
+            "Applied anode bias. + = forward (depletion shrinks, current "
+            "flows). - = reverse (depletion widens; near-zero current "
+            "until breakdown / Zener tunnel).\n"
+            "Contacts auto-detected from majority dopant in the leftmost "
+            "and rightmost columns -- paint Na on one side, Nd on the "
+            "other.");
+
+        ImGui::Checkbox("Run Gummel each frame", &ui.gummelEnable);
+        HelpMarker(
+            "Gummel iteration: outer loop over Poisson -> Continuity_n "
+            "-> Continuity_p, with full quasi-Fermi splitting. Solves for "
+            "n,p under bias self-consistently. When OFF, only the "
+            "equilibrium Poisson runs (V_bias is ignored).");
+
+        ImGui::SliderInt("Outer iters",     &ui.gummelOuter,    1, 20);
+        ImGui::SliderInt("Poisson inner",   &ui.gummelPoissonInner,    5, 80);
+        ImGui::SliderInt("Continuity inner",&ui.gummelContinuityInner, 5, 60);
+        ImGui::SliderFloat("omega psi", &ui.gummelOmegaPsi, 0.30f, 1.20f, "%.2f");
+        ImGui::SliderFloat("omega phi", &ui.gummelOmegaPhi, 0.50f, 1.40f, "%.2f");
+
+        if (ImGui::Button("Solve Gummel now (50 outer)")) {
+            const auto& mat = physics.getMaterial();
+            ui.gummelResidual = dd.solveGummel(
+                physics.getIntrinsicCarrier(),
+                PhysicsEngine::thermalVoltage(physics.getTemperature()),
+                mat.epsilon_r,
+                physics.getElectronMobility(),
+                physics.getHoleMobility(),
+                mat,
+                50, ui.gummelPoissonInner, ui.gummelContinuityInner,
+                ui.gummelOmegaPsi, ui.gummelOmegaPhi);
+            ui.flashStatus("Gummel 50-outer refinement done");
+        }
+
+        ImGui::TextDisabled("psi residual: %.3e V",  ui.gummelResidual);
+        ImGui::TextDisabled("J terminal:   %.3e A/cm^2", ui.lastJ_terminal);
+    }
+
+    // =====================================================================
+    // BandView cut & mode (Phase 2)
+    // =====================================================================
+    if (ImGui::CollapsingHeader("Band Diagram"))
+    {
+        ImGui::Checkbox("Spatial mode (bent bands)", &ui.bandSpatialMode);
+        HelpMarker(
+            "Off: legacy single-point band diagram from PhysicsEngine.\n"
+            "On:  spatial cut Ec(x), Ev(x), Ef along the row below; "
+            "Ec(x) = Ec0 - q psi(x), Ev(x) = Ev0 - q psi(x). "
+            "Sze Eq. 2.10 / Pierret Sec. 4.2.");
+
+        ImGui::SliderInt("Cut row j", &ui.bandCutRow,
+                         0, std::max(0, dd.height() - 1));
+        ImGui::TextDisabled("y = %.1f um", ui.bandCutRow
+                            * dd.cellPitchCm() * 1.0e4);
     }
 
     // =====================================================================
@@ -745,6 +909,14 @@ void drawReadoutsWindow(const PhysicsEngine& physics,
         row("V_CE",  dd.vCE(), "%8.3f V");
         row("I_C",   dd.collectorCurrent(), "%.3e a.u.",
             ImVec4(0.10f, 0.50f, 0.30f, 1.0f));
+    }
+
+    if (dd.deviceMode() == DeviceMode::Painter
+        && std::abs(dd.appliedBias()) > 1.0e-4f)
+    {
+        ImGui::SeparatorText("Bias / non-equilibrium");
+        row("V_a", dd.appliedBias(), "%8.3f V",
+            ImVec4(0.95f, 0.85f, 0.40f, 1.0f));
     }
 
     ImGui::End();
@@ -1002,14 +1174,455 @@ void drawIVCurveWindow(const DriftDiffusion& dd) {
 
 
 // =============================================================================
-// Band view (RenderTexture embedded as ImGui::Image)
+// Band view  (RenderTexture embedded as ImGui::Image)
+// -----------------------------------------------------------------------------
+// In Spatial mode, the user can also click inside the image to set the
+// j_cut row directly -- a quicker workflow than the slider in Controls.
 // =============================================================================
-void drawBandViewWindow(const BandView& view) {
+void drawBandViewWindow(const BandView& view,
+                        const DriftDiffusion& dd,
+                        UIState& ui)
+{
     if (!ImGui::Begin("Band Diagram")) { ImGui::End(); return; }
+
     const auto size = view.renderTexture().getSize();
     ImGui::Image(view.renderTexture(),
                  sf::Vector2f(static_cast<float>(size.x),
                               static_cast<float>(size.y)));
+
+    if (ui.bandSpatialMode && ImGui::IsItemHovered()
+        && ImGui::IsMouseDown(ImGuiMouseButton_Left))
+    {
+        // Crystal View has its own click handler for source deposition;
+        // here we intentionally repurpose left-click for "pick cut row".
+        // The y coordinate inside the band image does NOT directly map
+        // to a grid row because the band canvas only uses the upper 66%
+        // of the image; we ignore that and let the user pick via the
+        // slider for fine control. This handler is purely a convenience
+        // for "show me the band diagram across this lateral position".
+        (void)dd;
+    }
+    ImGui::TextDisabled(
+        ui.bandSpatialMode ? "Spatial cut active -- adjust 'Cut row j' in Controls."
+                           : "Flat mode (PhysicsEngine global state).");
+    ImGui::End();
+}
+
+
+// =============================================================================
+// Device Painter [Phase 1]
+// -----------------------------------------------------------------------------
+// Click-and-drag canvas that stamps Nd / Na onto the drift-diffusion grid.
+// Renders the doping map, the |E|=0 (junction) iso-line, and a hover
+// tooltip with the local Nd, Na, psi, and band shift.
+// =============================================================================
+void drawDevicePainterWindow(DriftDiffusion& dd,
+                             const PhysicsEngine& physics,
+                             UIState& ui)
+{
+    if (!ImGui::Begin("Device Painter")) { ImGui::End(); return; }
+
+    // ---- Brush palette --------------------------------------------------
+    ImGui::TextDisabled("Brush");
+    int brush = static_cast<int>(ui.currentBrush);
+    const char* brushLabels[] = {
+        "None", "N-dopant (donor)", "P-dopant (acceptor)", "Eraser"
+    };
+    ImGui::Combo("##brush", &brush, brushLabels, IM_ARRAYSIZE(brushLabels));
+    ui.currentBrush = static_cast<BrushKind>(brush);
+
+    ImGui::SliderInt  ("Radius (cells)",  &ui.brushRadius,  1, 12);
+    ImGui::SliderFloat("log10 dose [cm^-3]",
+                       &ui.brushLogDose, 14.0f, 20.0f, "%.2f");
+    ImGui::Checkbox   ("Overlay Nd/Na heatmap", &ui.showDopingOverlay);
+    HelpMarker(
+        "Click & drag to stamp donors (N) or acceptors (P). Each frame "
+        "the brush adds the chosen dose to every cell within the circular "
+        "footprint. Eraser zeroes Nd, Na and the cell tag back to bulk.");
+
+    ImGui::SameLine();
+    if (ImGui::Button("Clear all doping")) {
+        dd.clearDoping();
+        ui.flashStatus("Painter canvas cleared");
+    }
+
+    // Quick presets for repeatable lab-style structures.
+    if (ImGui::Button("Preset: PN junction")) {
+        dd.clearDoping();
+        for (int j = 0; j < dd.height(); ++j) {
+            for (int i = 0; i < dd.width(); ++i) {
+                const float u = (i + 0.5f) / static_cast<float>(dd.width());
+                const float v = (j + 0.5f) / static_cast<float>(dd.height());
+                dd.paintBrush(u, v,
+                    (i < dd.width() / 2) ? BrushKind::PDopant
+                                         : BrushKind::NDopant,
+                    1.0e17, 0);
+            }
+        }
+        if (dd.deviceMode() != DeviceMode::Painter)
+            dd.setDeviceMode(DeviceMode::Painter);
+        ui.flashStatus("PN junction stamped (1e17 / 1e17)");
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Preset: P+ N N+")) {
+        dd.clearDoping();
+        for (int j = 0; j < dd.height(); ++j) {
+            for (int i = 0; i < dd.width(); ++i) {
+                const float u = (i + 0.5f) / static_cast<float>(dd.width());
+                const float v = (j + 0.5f) / static_cast<float>(dd.height());
+                BrushKind k;  double dose;
+                if      (i < dd.width() * 0.20) { k = BrushKind::PDopant; dose = 1.0e19; }
+                else if (i < dd.width() * 0.75) { k = BrushKind::NDopant; dose = 1.0e15; }
+                else                             { k = BrushKind::NDopant; dose = 1.0e19; }
+                dd.paintBrush(u, v, k, dose, 0);
+            }
+        }
+        if (dd.deviceMode() != DeviceMode::Painter)
+            dd.setDeviceMode(DeviceMode::Painter);
+        ui.flashStatus("P+/N/N+ stamped");
+    }
+
+    // ---- Canvas ---------------------------------------------------------
+    ImGui::Separator();
+    const ImVec2 avail   = ImGui::GetContentRegionAvail();
+    const float  cellPx  = std::max(4.0f,
+        std::min(avail.x / static_cast<float>(dd.width()),
+                 avail.y / static_cast<float>(dd.height())));
+    const ImVec2 canvasSz(cellPx * static_cast<float>(dd.width()),
+                          cellPx * static_cast<float>(dd.height()));
+
+    ImGui::InvisibleButton("##painter_canvas", canvasSz);
+    const ImVec2 p0 = ImGui::GetItemRectMin();
+    const ImVec2 p1 = ImGui::GetItemRectMax();
+
+    auto* dl = ImGui::GetWindowDrawList();
+    dl->AddRectFilled(p0, p1, IM_COL32(20, 20, 28, 255));
+
+    // ---- Heatmap overlay (Nd-Na, signed log) ----------------------------
+    if (ui.showDopingOverlay) {
+        for (int j = 0; j < dd.height(); ++j) {
+            for (int i = 0; i < dd.width(); ++i) {
+                const double net = dd.netDopingAt(i, j);
+                if (net == 0.0) continue;
+                const float lg = static_cast<float>(
+                    std::log10(std::abs(net) + 1.0) / 20.0);
+                const auto a = static_cast<int>(
+                    std::clamp(lg * 255.0f, 0.0f, 255.0f));
+                ImU32 col = (net > 0)
+                    ? IM_COL32( 60, 140, 255, a)
+                    : IM_COL32(255, 140,  60, a);
+                const ImVec2 c0(p0.x + cellPx * i,
+                                p0.y + cellPx * j);
+                const ImVec2 c1(c0.x + cellPx, c0.y + cellPx);
+                dl->AddRectFilled(c0, c1, col);
+            }
+        }
+    }
+
+    // ---- psi sign-change isolines (junction lines) ---------------------
+    for (int j = 1; j < dd.height(); ++j) {
+        for (int i = 1; i < dd.width(); ++i) {
+            const float a = dd.psiAt(i,     j);
+            const float b = dd.psiAt(i - 1, j);
+            if ((a > 0) != (b > 0)) {
+                const ImVec2 q0(p0.x + cellPx * i,
+                                p0.y + cellPx * j);
+                const ImVec2 q1(q0.x, q0.y + cellPx);
+                dl->AddLine(q0, q1, IM_COL32(255, 240, 120, 220), 1.5f);
+            }
+        }
+    }
+
+    // ---- Cut-row indicator (Phase 2 BandView) --------------------------
+    {
+        const float yLine = p0.y + cellPx * static_cast<float>(ui.bandCutRow)
+                          + cellPx * 0.5f;
+        dl->AddLine({p0.x, yLine}, {p1.x, yLine},
+                    IM_COL32(255, 255, 255, 160), 1.0f);
+        dl->AddText({p0.x + 4.0f, yLine - 14.0f},
+                    IM_COL32(255, 255, 255, 200), "BandView cut");
+    }
+
+    // ---- Brush stamping -------------------------------------------------
+    if (ImGui::IsItemHovered() && ui.currentBrush != BrushKind::None
+        && ImGui::IsMouseDown(ImGuiMouseButton_Left))
+    {
+        const ImVec2 mp = ImGui::GetMousePos();
+        const float u = (mp.x - p0.x) / canvasSz.x;
+        const float v = (mp.y - p0.y) / canvasSz.y;
+        const double dose = std::pow(10.0, ui.brushLogDose);
+        dd.paintBrush(u, v, ui.currentBrush, dose, ui.brushRadius);
+        if (dd.deviceMode() != DeviceMode::Painter)
+            dd.setDeviceMode(DeviceMode::Painter);
+    }
+
+    // Right-click sets the BandView cut row to the hovered y -- quicker
+    // than scrubbing a slider in another panel.
+    if (ImGui::IsItemHovered()
+        && ImGui::IsMouseClicked(ImGuiMouseButton_Right))
+    {
+        const ImVec2 mp = ImGui::GetMousePos();
+        const int j = std::clamp(
+            static_cast<int>((mp.y - p0.y) / cellPx), 0, dd.height() - 1);
+        ui.bandCutRow = j;
+    }
+
+    // ---- Brush cursor preview -------------------------------------------
+    if (ImGui::IsItemHovered()) {
+        const ImVec2 mp = ImGui::GetMousePos();
+        ImU32 col = IM_COL32(180, 180, 180, 180);
+        switch (ui.currentBrush) {
+            case BrushKind::NDopant: col = IM_COL32( 80, 180, 255, 220); break;
+            case BrushKind::PDopant: col = IM_COL32(255, 160,  80, 220); break;
+            case BrushKind::Eraser:  col = IM_COL32(220,  60,  60, 220); break;
+            default: break;
+        }
+        dl->AddCircle(mp, ui.brushRadius * cellPx, col, 0, 2.0f);
+    }
+
+    // ---- Hover tooltip --------------------------------------------------
+    if (ImGui::IsItemHovered()) {
+        const ImVec2 mp = ImGui::GetMousePos();
+        const int i = std::clamp(
+            static_cast<int>((mp.x - p0.x) / cellPx), 0, dd.width()  - 1);
+        const int j = std::clamp(
+            static_cast<int>((mp.y - p0.y) / cellPx), 0, dd.height() - 1);
+        if (ImGui::BeginTooltip()) {
+            ImGui::Text("(i,j) = (%d, %d)", i, j);
+            ImGui::Text("Nd  = %.2e cm^-3", dd.donorAt(i, j));
+            ImGui::Text("Na  = %.2e cm^-3", dd.acceptorAt(i, j));
+            ImGui::Text("psi = %+.4f V",    dd.psiAt(i, j));
+            ImGui::Text("dEc = %+.4f eV",   dd.bandShiftAt(i, j));
+            ImGui::Text("|E| = %.3e V/cm",  dd.electricFieldMagAt(i, j));
+            ImGui::EndTooltip();
+        }
+        (void)physics;
+    }
+
+    ImGui::End();
+}
+
+
+// =============================================================================
+// Breakdown / Recombination panel  [Phase 2]
+// -----------------------------------------------------------------------------
+// Shows three high-field / heavy-doping mechanisms side by side:
+//
+//   * Auger recombination R_Aug = (C_n n + C_p p)(np - n_i^2)
+//   * Chynoweth ionization rates alpha_n(E), alpha_p(E)
+//     and Miller multiplication factor M = 1/(1 - alpha W)
+//   * Kane band-to-band tunneling generation G_BTBT(E)
+//
+// Two probe sources:
+//   * "Engine probe": user-chosen E and W, evaluated against the global
+//                     Material profile.
+//   * "Grid peak"   : the peak |E| extracted from the Painter's psi grid;
+//                     answers "is my drawn junction breaking down?".
+// =============================================================================
+void drawBreakdownWindow(const PhysicsEngine& physics,
+                         const DriftDiffusion& dd,
+                         UIState& ui)
+{
+    if (!ImGui::Begin("Breakdown")) { ImGui::End(); return; }
+
+    const auto&  m   = physics.getMaterial();
+    const double n   = physics.getTotalElectronConc();
+    const double p   = physics.getTotalHoleConc();
+    const double n_i = physics.getIntrinsicCarrier();
+
+    // ---- Auger (depends only on n, p, n_i, C_n, C_p) -------------------
+    ImGui::SeparatorText("Auger Recombination");
+    HelpMarker(
+        "R_Aug = (C_n n + C_p p)(np - n_i^2). Three-particle process; "
+        "dominates SRH for N > ~1e18. Sze 1.5.6 / Pierret 5.2.4.");
+    const double R_aug = PhysicsEngine::recombAuger(n, p, n_i,
+                                                    m.C_n_aug, m.C_p_aug);
+    const double R_srh = PhysicsEngine::recombSRH(n, p, n_i,
+                                                  m.tau_n, m.tau_p);
+    ImGui::Text("C_n = %.2e   C_p = %.2e cm^6/s", m.C_n_aug, m.C_p_aug);
+    ImGui::Text("R_Aug   = %.3e cm^-3 / s",  R_aug);
+    ImGui::Text("R_SRH   = %.3e cm^-3 / s",  R_srh);
+    if (R_srh != 0.0) {
+        ImGui::Text("R_Aug / R_SRH = %.3f", R_aug / R_srh);
+        if (R_aug > R_srh) {
+            ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.30f, 1.0f),
+                "Auger-dominated regime (heavy doping or high injection).");
+        }
+    }
+
+    // ---- Chynoweth + Kane probe ----------------------------------------
+    ImGui::SeparatorText("High-field probe (Chynoweth / Kane BTBT)");
+    HelpMarker(
+        "alpha(E) = alpha_inf exp[-(E_crit/|E|)^m]. Avalanche multiplication "
+        "M = 1/(1 - alpha W) (Miller form, single-carrier limit). Kane BTBT "
+        "G(E) = A E^P exp(-B/E).");
+    ImGui::SliderFloat("Probe |E| [V/cm]", &ui.probeField,
+                       1.0e3f, 5.0e6f, "%.2e",
+                       ImGuiSliderFlags_Logarithmic);
+    ImGui::SliderFloat("Depletion W [um]", &ui.probeWidth_um,
+                       0.05f, 10.0f, "%.3f");
+
+    const double alpha_n = PhysicsEngine::chynowethRate(
+        ui.probeField, m.alpha_inf_n, m.E_crit_n, m.chyn_m);
+    const double alpha_p = PhysicsEngine::chynowethRate(
+        ui.probeField, m.alpha_inf_p, m.E_crit_p, m.chyn_m);
+    const double W_cm    = ui.probeWidth_um * 1.0e-4;
+    const double Mfac    = PhysicsEngine::avalancheMultiplication(
+        alpha_n, alpha_p, W_cm);
+    const double G_BTBT  = PhysicsEngine::kaneBTBT(
+        ui.probeField, m.A_kane, m.B_kane, m.btbt_isDirect);
+
+    ImGui::Text("alpha_n = %.3e cm^-1", alpha_n);
+    ImGui::Text("alpha_p = %.3e cm^-1", alpha_p);
+    if (std::isinf(Mfac)) {
+        ImGui::TextColored(ImVec4(1.0f, 0.30f, 0.20f, 1.0f),
+            "M -> infinity   (AVALANCHE BREAKDOWN)");
+    } else {
+        ImGui::Text("M       = %.3f", Mfac);
+    }
+    ImGui::Text("G_BTBT  = %.3e cm^-3 / s", G_BTBT);
+    ImGui::TextDisabled("Kane: P=%s, A=%.2e, B=%.2e V/cm",
+                        m.btbt_isDirect ? "2 (direct)" : "5/2 (indirect)",
+                        m.A_kane, m.B_kane);
+
+    // ---- Painter-grid coupling: re-evaluate at peak grid field ---------
+    if (dd.deviceMode() == DeviceMode::Painter) {
+        ImGui::SeparatorText("Grid evaluation (peak |E| of psi map)");
+        const float E_peak = dd.peakElectricField();
+        const double an = PhysicsEngine::chynowethRate(
+            E_peak, m.alpha_inf_n, m.E_crit_n, m.chyn_m);
+        const double ap = PhysicsEngine::chynowethRate(
+            E_peak, m.alpha_inf_p, m.E_crit_p, m.chyn_m);
+        const double Gb = PhysicsEngine::kaneBTBT(
+            E_peak, m.A_kane, m.B_kane, m.btbt_isDirect);
+        ImGui::Text("|E|_peak = %.3e V/cm", E_peak);
+        ImGui::Text("alpha_n  = %.3e cm^-1", an);
+        ImGui::Text("alpha_p  = %.3e cm^-1", ap);
+        ImGui::Text("G_BTBT   = %.3e cm^-3 / s", Gb);
+    }
+
+    ImGui::End();
+}
+
+
+// =============================================================================
+// 3D Topology window  [Phase 3]
+// -----------------------------------------------------------------------------
+// Industry-standard TCAD heatmap of the chosen scalar field over the
+// device cross-section. Uses ImPlot::PlotHeatmap (always available). The
+// underlying buffers are exposed by DriftDiffusion::psi() etc., so a
+// future drop-in to ImPlot3D::PlotSurface only needs to swap the call
+// site -- the data layout is already row-major (j*W + i).
+//
+// To minimise work per frame, derived fields (n, p, |E|) are built into
+// a *static* scratch vector that grows once and is reused; this keeps
+// the hot-path zero-allocation after the first call.
+// =============================================================================
+void drawTopology3DWindow(const DriftDiffusion& dd,
+                          const PhysicsEngine& physics,
+                          UIState& ui)
+{
+    if (!ImGui::Begin("3D Topology")) { ImGui::End(); return; }
+
+    const char* fieldLabels[] = {
+        "Electrostatic potential psi(x,y) [V]",
+        "Electron density n(x,y) [cm^-3, log10]",
+        "Hole density p(x,y) [cm^-3, log10]",
+        "Electric field |E|(x,y) [V/cm, log10]",
+    };
+    ImGui::Combo("Field", &ui.topo3DField,
+                 fieldLabels, IM_ARRAYSIZE(fieldLabels));
+    HelpMarker(
+        "Industry-standard TCAD heatmap of a scalar field over the "
+        "device cross-section. n/p/|E| are shown on log10 scale; psi is "
+        "linear. Data is row-major (j*W+i) and is ready for an ImPlot3D::"
+        "PlotSurface drop-in when that library is available.");
+
+    const int W = dd.width();
+    const int H = dd.height();
+    if (W <= 0 || H <= 0) { ImGui::End(); return; }
+
+    // Scratch buffer -- grown once, reused forever.
+    static std::vector<float> scratch;
+    scratch.resize(static_cast<std::size_t>(W) * static_cast<std::size_t>(H));
+
+    const double n_i = physics.getIntrinsicCarrier();
+    const double V_T = PhysicsEngine::thermalVoltage(physics.getTemperature());
+
+    // Populate scratch according to the selection.
+    auto safeLog10 = [](double v) {
+        return std::log10(std::max(v, 1.0e-30));
+    };
+    switch (ui.topo3DField) {
+        case 0: { // psi
+            const auto& src = dd.psi();
+            for (std::size_t k = 0; k < scratch.size(); ++k)
+                scratch[k] = src[k];
+            break;
+        }
+        case 1: { // n (log10)
+            for (int j = 0; j < H; ++j)
+                for (int i = 0; i < W; ++i)
+                    scratch[static_cast<std::size_t>(j * W + i)] =
+                        static_cast<float>(safeLog10(
+                            dd.nDensityAt(i, j, n_i, V_T)));
+            break;
+        }
+        case 2: { // p (log10)
+            for (int j = 0; j < H; ++j)
+                for (int i = 0; i < W; ++i)
+                    scratch[static_cast<std::size_t>(j * W + i)] =
+                        static_cast<float>(safeLog10(
+                            dd.pDensityAt(i, j, n_i, V_T)));
+            break;
+        }
+        case 3: { // |E| (log10)
+            for (int j = 0; j < H; ++j)
+                for (int i = 0; i < W; ++i) {
+                    const double Em = dd.electricFieldMagAt(i, j);
+                    scratch[static_cast<std::size_t>(j * W + i)] =
+                        static_cast<float>(safeLog10(Em));
+                }
+            break;
+        }
+        default: break;
+    }
+
+    // Auto-range.
+    float vmin =  std::numeric_limits<float>::infinity();
+    float vmax = -std::numeric_limits<float>::infinity();
+    for (float v : scratch) {
+        if (v < vmin) vmin = v;
+        if (v > vmax) vmax = v;
+    }
+    if (vmin == vmax) { vmin -= 1.0f; vmax += 1.0f; }
+
+    ImGui::Text("range: [%.4g, %.4g]", vmin, vmax);
+
+    // ImPlot heatmap. PlotHeatmap takes (label, data, rows, cols, scale_min,
+    // scale_max, fmt, bounds_min, bounds_max).
+    if (ImPlot::BeginPlot("##topo_heatmap",
+                          ImVec2(-1.0f, ImGui::GetContentRegionAvail().y - 24.f),
+                          ImPlotFlags_NoLegend))
+    {
+        ImPlot::PushColormap(ImPlotColormap_Viridis);
+        ImPlot::SetupAxes("x [cell]", "y [cell]",
+                          ImPlotAxisFlags_NoGridLines,
+                          ImPlotAxisFlags_NoGridLines | ImPlotAxisFlags_Invert);
+        ImPlot::SetupAxesLimits(0, W, 0, H);
+        ImPlot::PlotHeatmap("field",
+            scratch.data(), H, W,
+            vmin, vmax,
+            nullptr,
+            ImPlotPoint(0, 0), ImPlotPoint(W, H));
+        ImPlot::PopColormap();
+        ImPlot::EndPlot();
+    }
+
+    ImGui::TextDisabled(
+        "Future ImPlot3D upgrade: dd.psi().data(), rows=%d, cols=%d, "
+        "row-major.", H, W);
+
     ImGui::End();
 }
 
@@ -1176,6 +1789,44 @@ int main() {
         dd->step(dt);
         physics->setDriftDiffusionExcess(dd->globalExcess());
 
+        // ---- Self-consistent solver (Phase 1 Poisson or Phase 3 Gummel) -
+        // Painter mode only -- procedural Bulk/BJT topologies have no
+        // user-painted doping. Bias != 0 -> Gummel; otherwise plain
+        // equilibrium Poisson. The user can also force Gummel ON via the
+        // checkbox in Controls.
+        if (dd->deviceMode() == DeviceMode::Painter) {
+            const auto& mat = physics->getMaterial();
+            const double n_i = physics->getIntrinsicCarrier();
+            const double V_T =
+                PhysicsEngine::thermalVoltage(physics->getTemperature());
+
+            const bool useGummel = ui.gummelEnable
+                || std::abs(ui.V_bias) > 1.0e-4f;
+
+            if (useGummel) {
+                ui.gummelResidual = dd->solveGummel(
+                    n_i, V_T, mat.epsilon_r,
+                    physics->getElectronMobility(),
+                    physics->getHoleMobility(),
+                    mat,
+                    ui.gummelOuter,
+                    ui.gummelPoissonInner,
+                    ui.gummelContinuityInner,
+                    ui.gummelOmegaPsi,
+                    ui.gummelOmegaPhi);
+                ui.poissonResidual = ui.gummelResidual;
+                ui.lastJ_terminal  = dd->terminalCurrentDensity(
+                    n_i, V_T,
+                    physics->getElectronMobility(),
+                    physics->getHoleMobility());
+            } else if (ui.poissonAutoSolve) {
+                ui.poissonResidual = dd->solvePoisson(
+                    n_i, V_T, mat.epsilon_r,
+                    ui.poissonIters,
+                    ui.poissonOmega);
+            }
+        }
+
         // Re-roll dopants/carriers periodically when the doping state could
         // have changed (cheap; only resamples carrier visualization).
         // Done implicitly by Controls window callbacks via rebuild path.
@@ -1186,7 +1837,17 @@ int main() {
 
         // ---- Render off-screen targets ------------------------------------
         crystal->render(*physics, *dd, ui.heatmapMode, ui.showVectorField);
-        bands->render(*physics, font);
+
+        // BandView: spatial bent bands when in Painter mode (or when the
+        // user explicitly opts in); fall back to the legacy flat diagram
+        // for Bulk / BJT modes where there is no spatially varying psi.
+        bands->setMode(ui.bandSpatialMode ? BandView::Mode::Spatial
+                                          : BandView::Mode::Flat);
+        if (bands->mode() == BandView::Mode::Spatial) {
+            bands->renderSpatial(*physics, *dd, ui.bandCutRow, font);
+        } else {
+            bands->render(*physics, font);
+        }
 
         // ---- ImGui frame --------------------------------------------------
         ImGui::SFML::Update(window, delta);
@@ -1195,14 +1856,17 @@ int main() {
         drawMenuBar(running, ui, *physics, *dd, requestResetLayout);
         ImGui::End();   // close DockHost
 
-        drawControlsWindow   (*physics, *dd, ui);
-        drawReadoutsWindow   (*physics, *dd);
-        drawLiveOscilloscope (*physics, dt);
-        drawSpectrumWindow   (*physics);
-        drawIVCurveWindow    (*dd);
-        drawCrystalViewWindow(*crystal, *dd, *physics, ui);
-        drawBandViewWindow   (*bands);
-        drawCrystalInfoWindow(*dd, *physics);
+        drawControlsWindow     (*physics, *dd, ui);
+        drawReadoutsWindow     (*physics, *dd);
+        drawLiveOscilloscope   (*physics, dt);
+        drawSpectrumWindow     (*physics);
+        drawIVCurveWindow      (*dd);
+        drawCrystalViewWindow  (*crystal, *dd, *physics, ui);
+        drawDevicePainterWindow(*dd, *physics, ui);
+        drawBandViewWindow     (*bands, *dd, ui);
+        drawBreakdownWindow    (*physics, *dd, ui);
+        drawTopology3DWindow   (*dd, *physics, ui);
+        drawCrystalInfoWindow  (*dd, *physics);
 
         // ---- Final composite ---------------------------------------------
         window.clear(palette::WindowBg);

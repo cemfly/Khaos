@@ -617,3 +617,183 @@ bool PhysicsEngine::exportCSV(const std::string& path) const {
     file << oss.str();
     return file.good();
 }
+
+
+// =============================================================================
+// Poisson / electrostatics                              [Phase 1: Poisson]
+// -----------------------------------------------------------------------------
+// Equilibrium Boltzmann statistics. Argument is clamped at +/-40 V_T because
+// exp(40) ~ 2.4e17 is already past anything physically relevant (degenerate
+// regime); IEEE-754 inf at +-700 would otherwise blow up the Gauss-Seidel.
+// Reference: Sze Eq. 1.20; Pierret Eq. 4.27.
+// =============================================================================
+double PhysicsEngine::equilibriumElectronDensity(
+    double n_i, double psi, double V_T) noexcept
+{
+    const double x = std::clamp(psi / V_T, -40.0, 40.0);
+    return n_i * std::exp(x);
+}
+
+double PhysicsEngine::equilibriumHoleDensity(
+    double n_i, double psi, double V_T) noexcept
+{
+    const double x = std::clamp(-psi / V_T, -40.0, 40.0);
+    return n_i * std::exp(x);
+}
+
+double PhysicsEngine::builtInPotential(
+    double Nd, double Na, double n_i, double V_T) noexcept
+{
+    if (Nd <= 0.0 || Na <= 0.0 || n_i <= 0.0) return 0.0;
+    return V_T * std::log(Nd * Na / (n_i * n_i));
+}
+
+double PhysicsEngine::debyeLengthCm(
+    double epsilon_r, double N_per_cm3, double V_T) noexcept
+{
+    if (N_per_cm3 <= 0.0) return 0.0;
+    const double eps_s = phys::eps_0 * epsilon_r;
+    return std::sqrt(eps_s * V_T / (phys::q_e * N_per_cm3));
+}
+
+
+// =============================================================================
+// Non-equilibrium quasi-Fermi statistics       [Phase 3]
+// -----------------------------------------------------------------------------
+// Argument is clamped at +/-40 V_T (~1 V at 300 K) for numerical safety;
+// this is well past degeneracy and any practical bias range.
+// =============================================================================
+double PhysicsEngine::nonEqElectronDensity(
+    double n_i, double psi, double phi_n, double V_T) noexcept
+{
+    const double x = std::clamp((psi - phi_n) / V_T, -40.0, 40.0);
+    return n_i * std::exp(x);
+}
+
+double PhysicsEngine::nonEqHoleDensity(
+    double n_i, double psi, double phi_p, double V_T) noexcept
+{
+    const double x = std::clamp((phi_p - psi) / V_T, -40.0, 40.0);
+    return n_i * std::exp(x);
+}
+
+double PhysicsEngine::ohmicContactPsi(
+    double V_metal, double Nd, double Na,
+    double n_i, double V_T) noexcept
+{
+    // Charge neutrality at an ohmic contact: n - p + Na - Nd = 0,
+    // combined with np = n_i^2 (thermal equilibrium at the metal). For
+    // a heavily-doped contact (the practical case), this reduces to:
+    //   n-contact (Nd >> Na):  psi = V_metal + V_T ln(Nd / n_i)
+    //   p-contact (Na >> Nd):  psi = V_metal - V_T ln(Na / n_i)
+    // Sze Eq. 2.7. We use the asymmetric form -- compensated contacts
+    // are not handled (would require solving the quadratic).
+    if (Nd > Na && Nd > 0.0 && n_i > 0.0) {
+        return V_metal + V_T * std::log(Nd / n_i);
+    }
+    if (Na > 0.0 && n_i > 0.0) {
+        return V_metal - V_T * std::log(Na / n_i);
+    }
+    return V_metal;   // intrinsic contact (uncommon): no shift.
+}
+
+
+// =============================================================================
+// Auger recombination
+// -----------------------------------------------------------------------------
+// Three-particle process; the (np - n_i^2) factor enforces detailed balance
+// (R = 0 in equilibrium). Dominates SRH for N > ~1e18.
+// Reference: Sze Sec. 1.5.6 / Pierret Sec. 5.2.4.
+// =============================================================================
+double PhysicsEngine::recombAuger(
+    double n, double p, double n_i,
+    double C_n, double C_p) noexcept
+{
+    const double excess = n * p - n_i * n_i;
+    return (C_n * n + C_p * p) * excess;
+}
+
+
+// =============================================================================
+// Chynoweth impact ionization
+// -----------------------------------------------------------------------------
+// alpha(E) = alpha_inf * exp[-(E_crit / |E|)^m]   [cm^-1]
+//
+// The exponent is hard-cut at 80 (the floor of double-precision exp's useful
+// range) so that vanishing E-fields produce alpha = 0 cleanly instead of
+// generating subnormals or NaNs. At |E| -> 0 the original formula gives
+// alpha -> 0 anyway, so the clamp does not perturb the physics.
+//
+// Reference: Chynoweth, Phys. Rev. 109 (1958) 1537; Sze Sec. 2.4.2;
+// Van Overstraeten - de Man, Solid-State Electronics 13 (1970) 583.
+// =============================================================================
+double PhysicsEngine::chynowethRate(
+    double E_field_V_per_cm,
+    double alpha_inf, double E_crit, double m) noexcept
+{
+    const double E = std::abs(E_field_V_per_cm);
+    if (E <= 0.0 || alpha_inf <= 0.0 || E_crit <= 0.0) return 0.0;
+    const double ratio = E_crit / E;
+    const double arg   = (m == 1.0) ? ratio : std::pow(ratio, m);
+    if (arg > 80.0) return 0.0;        // exp underflow guard
+    return alpha_inf * std::exp(-arg);
+}
+
+
+// =============================================================================
+// Avalanche multiplication factor (uniform field, single-carrier limit)
+// -----------------------------------------------------------------------------
+// For arbitrary alpha_n != alpha_p the exact ionization integral gives
+//
+//     1 - 1/M = int_0^W alpha_n exp{ -int_0^x (alpha_n - alpha_p) dx' } dx
+//
+// In the homogeneous-field, single-carrier limit (alpha_n ~ alpha_p =
+// alpha_eff) this collapses to the classical Miller form
+//
+//     M = 1 / (1 - alpha_eff * W)
+//
+// which we use here because it is the tractable closed-form expression
+// suitable for a real-time UI gauge.  alpha_eff is taken as max(alpha_n,
+// alpha_p) so the answer is conservative (breakdown predicted earlier).
+//
+// Reference: Sze Sec. 2.4.2 Eq. 65; Miller, Phys. Rev. 99 (1955) 1234.
+// =============================================================================
+double PhysicsEngine::avalancheMultiplication(
+    double alpha_n, double alpha_p,
+    double depletion_width_cm) noexcept
+{
+    const double a_eff = std::max(alpha_n, alpha_p);
+    const double prod  = a_eff * std::max(0.0, depletion_width_cm);
+    if (prod >= 0.999) return std::numeric_limits<double>::infinity();
+    return 1.0 / (1.0 - prod);
+}
+
+
+// =============================================================================
+// Band-to-band (Zener) tunneling -- Kane model
+// -----------------------------------------------------------------------------
+//
+//   G_BTBT(E) = A * E^P * exp(-B / |E|)         [cm^-3 / s]
+//
+//     P = 2     (direct gap)
+//     P = 5/2   (indirect, phonon-assisted)
+//
+// At 300 K in Si this becomes appreciable above |E| ~ 1e6 V/cm; in Ge or
+// narrow-gap III-V it lights up an order of magnitude earlier (smaller B).
+//
+// Reference: Kane, J. Phys. Chem. Solids 12 (1959) 181;
+//            Hurkx et al., IEEE Trans. ED 39 (1992) 331; Sze Sec. 4.3.
+// =============================================================================
+double PhysicsEngine::kaneBTBT(
+    double E_field_V_per_cm,
+    double A_kane, double B_kane,
+    bool isDirect) noexcept
+{
+    const double E = std::abs(E_field_V_per_cm);
+    if (E <= 0.0 || A_kane <= 0.0 || B_kane <= 0.0) return 0.0;
+    const double exp_arg = B_kane / E;
+    if (exp_arg > 80.0) return 0.0;       // tunneling negligible
+    const double power = isDirect ? (E * E)
+                                  : (E * E * std::sqrt(E));   // E^(5/2)
+    return A_kane * power * std::exp(-exp_arg);
+}

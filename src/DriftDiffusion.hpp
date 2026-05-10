@@ -35,6 +35,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <span>
 #include <vector>
 
 #include "Material.hpp"
@@ -43,21 +44,37 @@
 // -----------------------------------------------------------------------------
 // Top-level device mode. Bulk = a single homogeneous wafer with optional
 // laser sources. NpnBjt = N-type emitter + thin P-base + N-collector with
-// V_BE / V_CE biasing (textbook NPN).
+// V_BE / V_CE biasing (textbook NPN). Painter = user-defined topology (the
+// painter UI stamps Nd/Na onto the grid; rebuildRegionMap leaves it alone).
 // -----------------------------------------------------------------------------
-enum class DeviceMode : std::uint8_t { Bulk = 0, NpnBjt = 1 };
+enum class DeviceMode : std::uint8_t { Bulk = 0, NpnBjt = 1, Painter = 2 };
 
 
 // -----------------------------------------------------------------------------
 // Per-cell region tag. Bulk cells participate in carrier diffusion only;
 // emitter/collector cells additionally enforce Dirichlet boundary conditions
-// for n every step (forward injection / sweep-out).
+// for n every step. NDoped/PDoped are Painter-mode tags applied by the
+// brush; the Poisson solver does not care about the tag (it reads Nd, Na
+// directly), but the visualisation does.
 // -----------------------------------------------------------------------------
 enum class CellRegion : std::uint8_t {
     Bulk      = 0,
     Emitter   = 1,
     Base      = 2,
     Collector = 3,
+    NDoped    = 4,
+    PDoped    = 5,
+};
+
+
+// -----------------------------------------------------------------------------
+// Brush selection used by the Device Painter UI.
+// -----------------------------------------------------------------------------
+enum class BrushKind : std::uint8_t {
+    None    = 0,
+    NDopant = 1,    // stamps donors    (Nd += dose)
+    PDopant = 2,    // stamps acceptors (Na += dose)
+    Eraser  = 3,    // resets the painted cell to intrinsic
 };
 
 
@@ -90,6 +107,134 @@ public:
     [[nodiscard]] float vBE() const noexcept { return m_VBE; }
     [[nodiscard]] float vCE() const noexcept { return m_VCE; }
     [[nodiscard]] CellRegion regionAt(int i, int j) const noexcept;
+
+    // ---- Device painter [Phase 1] ---------------------------------------
+    //
+    // Stamps a circular brush of radius `radius_cells` around UV (0..1)
+    // at concentration `dose` [cm^-3]. Strictly zero-allocation; iterates
+    // a clipped square AABB. NDopant/PDopant are additive; Eraser zeroes.
+    void paintBrush(float u, float v,
+                    BrushKind kind,
+                    double dose      = 1.0e17,
+                    int radius_cells = 3) noexcept;
+    void clearDoping() noexcept;
+
+    [[nodiscard]] double netDopingAt(int i, int j) const noexcept;
+    [[nodiscard]] double donorAt    (int i, int j) const noexcept;
+    [[nodiscard]] double acceptorAt (int i, int j) const noexcept;
+    void setCellPitchCm(float h) noexcept;
+    [[nodiscard]] float cellPitchCm() const noexcept { return m_cell_pitch_cm; }
+
+    // ---- Poisson solver  [Phase 1] --------------------------------------
+    //
+    // Solves equilibrium  eps_s grad^2 psi = -q (p(psi) - n(psi) + Nd - Na)
+    // by Gauss-Seidel under-relaxation. Returns L2 residual of the last
+    // sweep (in volts). All buffers preallocated; zero-allocation hot-path.
+    [[nodiscard]] double solvePoisson(double n_i_cm3,
+                                      double V_T,
+                                      double epsilon_r,
+                                      int    iterations = 80,
+                                      double omega      = 0.85) noexcept;
+
+    [[nodiscard]] float psiAt(int i, int j) const noexcept;
+    [[nodiscard]] float bandShiftAt(int i, int j) const noexcept;
+
+    // Electric field magnitude at (i,j) from psi gradient.
+    //   E = -grad(psi);   |E| = sqrt(E_x^2 + E_y^2)         [V/cm]
+    // Used by Chynoweth / Kane BTBT plotting.
+    [[nodiscard]] float electricFieldMagAt(int i, int j) const noexcept;
+    [[nodiscard]] float electricFieldX  (int i, int j) const noexcept;
+    [[nodiscard]] float electricFieldY  (int i, int j) const noexcept;
+    [[nodiscard]] float peakElectricField() const noexcept;
+
+    // ---- Spatial cut sampling [Phase 2: BandView] -----------------------
+    //
+    // Fills caller-owned buffers along a horizontal cut at j = j_row:
+    //   psi[i], Ec[i], Ev[i]                 -- length = m_W
+    //
+    // Pre-allocated callers; we never resize. Returns false if the row is
+    // out of range or the spans are too small.
+    [[nodiscard]] bool sampleHorizontalCut(
+        int j_row,
+        std::span<float> out_psi,
+        std::span<float> out_Ec,
+        std::span<float> out_Ev,
+        double Ec0, double Ev0) const noexcept;
+
+    // Sample electric-field magnitude along a horizontal cut.
+    [[nodiscard]] bool sampleEFieldCut(
+        int j_row, std::span<float> out_E) const noexcept;
+
+    // Sample net doping along a horizontal cut (signed Nd-Na).
+    [[nodiscard]] bool sampleDopingCut(
+        int j_row, std::span<float> out_net) const noexcept;
+
+    // ---- Phase 3 -- Non-equilibrium / Gummel solver ---------------------
+    //
+    // External bias applied between the painted contacts (anode at +V_a,
+    // cathode at 0).  Detected automatically: leftmost / rightmost columns
+    // are scanned for majority dopant; the side with more acceptors is
+    // tagged anode, the side with more donors is tagged cathode. The user
+    // does not need to mark contacts explicitly.
+    void  setAppliedBias(float V_a) noexcept;
+    [[nodiscard]] float appliedBias() const noexcept { return m_V_bias; }
+
+    // Quasi-Fermi state. In equilibrium both buffers are zero everywhere,
+    // and the equations reduce to the Boltzmann / Phase-1 limit.
+    [[nodiscard]] float phiN(int i, int j) const noexcept;
+    [[nodiscard]] float phiP(int i, int j) const noexcept;
+
+    // Local density evaluated from psi, phi_n / phi_p:
+    //   n = n_i exp((psi - phi_n) / V_T),
+    //   p = n_i exp((phi_p - psi) / V_T).
+    [[nodiscard]] double nDensityAt(int i, int j,
+                                    double n_i, double V_T) const noexcept;
+    [[nodiscard]] double pDensityAt(int i, int j,
+                                    double n_i, double V_T) const noexcept;
+
+    // Gummel iteration: outer loop Poisson -> Continuity_n -> Continuity_p.
+    // Each inner solver is Gauss-Seidel under-relaxation on a 5-point
+    // stencil. mu_n / mu_p are the *bulk* low-field mobilities supplied
+    // by the engine (Matthiessen / Arora).  Returns the L2 change in psi
+    // across the last outer iteration (volts) -- a useful convergence
+    // indicator for the UI.
+    //
+    // Strictly zero-allocation: every working buffer is preallocated at
+    // construction.  Scharfetter-Gummel-style flux discretization is
+    // approximated here with arithmetic-mean face densities; for the
+    // pedagogical real-time UI this is stable up to ~10 V reverse bias
+    // and ~1 V forward bias on a 1 um grid.
+    //
+    // Reference: Gummel, IEEE TED-11 (1964) 455; Selberherr Ch. 6;
+    // Sze Sec. 2.3.
+    [[nodiscard]] double solveGummel(
+        double n_i, double V_T, double epsilon_r,
+        double mu_n, double mu_p,
+        const material::Profile& mat,
+        int    outer_iters       = 6,
+        int    poisson_inner     = 30,
+        int    continuity_inner  = 20,
+        double omega_psi         = 0.85,
+        double omega_phi         = 1.00) noexcept;
+
+    // ---- Phase 3 -- Quasi-Fermi cuts (BandView spatial render) ---------
+    [[nodiscard]] bool sampleQuasiFermiCut(
+        int j_row,
+        std::span<float> out_phi_n,
+        std::span<float> out_phi_p) const noexcept;
+
+    // Average current density across the device (mid-column proxy):
+    // J = J_n + J_p averaged along i = W/2.  Pierret App. C.
+    [[nodiscard]] double terminalCurrentDensity(
+        double n_i, double V_T,
+        double mu_n, double mu_p) const noexcept;
+
+    // ---- Bulk data accessors (3D heatmap window, future ImPlot3D) ------
+    [[nodiscard]] const std::vector<float>& psi()         const noexcept { return m_psi; }
+    [[nodiscard]] const std::vector<float>& phiNField()   const noexcept { return m_phi_n; }
+    [[nodiscard]] const std::vector<float>& phiPField()   const noexcept { return m_phi_p; }
+    [[nodiscard]] const std::vector<float>& donorField()  const noexcept { return m_Nd; }
+    [[nodiscard]] const std::vector<float>& acceptorField()const noexcept{ return m_Na; }
 
     // Approximate collector-emitter current (sweep-out rate). Useful for
     // reporting transistor "operating point" in the readouts panel.
@@ -125,6 +270,34 @@ private:
     void applyBjtBoundaries();
     void rebuildRegionMap();
 
+    // ---- Phase 3 inner solvers ------------------------------------------
+    //
+    // The shared core of Phase-1 solvePoisson and Phase-3 solveGummel:
+    // performs `sweeps` Gauss-Seidel iterations of the nonlinear Poisson
+    // equation reading m_phi_n, m_phi_p (zero -> equilibrium reduction).
+    [[nodiscard]] double solvePoissonInner(double n_i, double V_T,
+                                           double epsilon_r,
+                                           int sweeps,
+                                           double omega) noexcept;
+
+    // Solve for phi_n by relaxing  div(mu_n n grad phi_n) = R - G
+    // where R, G fold in SRH + Auger - Kane BTBT. Arithmetic-mean face
+    // density for the coefficient -- not Scharfetter-Gummel, but stable
+    // for the real-time UI on 1 um grids.
+    void solveContinuityElectron(double n_i, double V_T,
+                                 double mu_n,
+                                 const material::Profile& mat,
+                                 int sweeps, double omega) noexcept;
+    void solveContinuityHole    (double n_i, double V_T,
+                                 double mu_p,
+                                 const material::Profile& mat,
+                                 int sweeps, double omega) noexcept;
+
+    // Apply Dirichlet BCs at the outer columns (anode / cathode), set
+    // by majority-dopant detection. Called at the start of each Gummel
+    // outer iteration.
+    void applyContactBoundaries(double n_i, double V_T) noexcept;
+
     // ---- Index helpers --------------------------------------------------
     [[nodiscard]] inline std::size_t idx(int i, int j) const noexcept {
         return static_cast<std::size_t>(j) * static_cast<std::size_t>(m_W)
@@ -146,8 +319,31 @@ private:
     std::vector<float> m_T;
     std::vector<float> m_T_next;
 
-    // ---- Region map (BJT) -----------------------------------------------
+    // ---- Region map (BJT / Painter) -------------------------------------
     std::vector<std::uint8_t> m_region;
+
+    // ---- Doping fields (painter-driven) [Phase 1] -----------------------
+    std::vector<float> m_Nd;          // donor    concentration [cm^-3]
+    std::vector<float> m_Na;          // acceptor concentration [cm^-3]
+
+    // ---- Electrostatics [Phase 1] ---------------------------------------
+    std::vector<float> m_psi;         // electrostatic potential [V]
+    std::vector<float> m_psi_next;    // double buffer for sweeps
+
+    // Cell pitch in cm. Default 1 um is a textbook visualisation scale;
+    // for sharper junctions reduce to ~L_D / 4 (Si N=1e16 -> ~10 nm).
+    float m_cell_pitch_cm = 1.0e-4f;
+
+    // ---- Phase 3 -- Non-equilibrium quasi-Fermi state -------------------
+    std::vector<float> m_phi_n;       // electron quasi-Fermi potential [V]
+    std::vector<float> m_phi_p;       // hole     quasi-Fermi potential [V]
+    float              m_V_bias = 0.0f;   // applied anode bias [V]
+
+    // Cached contact roles (computed once per Gummel call, not per sweep).
+    // 0 = none, 1 = anode, 2 = cathode. Stored as a per-cell uint8 so we
+    // can tag arbitrary user-painted layouts (not just the outer columns).
+    std::vector<std::uint8_t> m_contact;
+    bool                      m_contacts_dirty = true;
 
     // ---- Material-tunable integrator constants --------------------------
     float m_D_n        = 0.04f;   // carrier diffusion strength per unit dt

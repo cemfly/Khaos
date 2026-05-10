@@ -131,6 +131,82 @@ struct Profile {
     double kappa;        // [W / (cm K)]   thermal conductivity at 300 K
     double rho_cp;       // [J / (cm^3 K)] volumetric heat capacity
 
+    // ---- Electrostatic (Poisson solver) ----------------------------------
+    //
+    //   Static dielectric constant. Required by the Poisson equation
+    //
+    //       div(eps_s grad psi) = -q (p - n + Nd+ - Na-)
+    //
+    //   Si:   11.7    GaAs: 12.9    Ge: 16.0    (Sze Tab. 1.1)
+    double epsilon_r;    // [-] static relative permittivity
+
+    // ---- Auger recombination ---------------------------------------------
+    //
+    //   R_Aug = (C_n n + C_p p) (n p - n_i^2)
+    //
+    //   Three-particle process: an excess pair recombines and the released
+    //   energy is absorbed by a third carrier (electron-electron-hole or
+    //   hole-hole-electron). Dominates SRH/radiative for N > ~1e18 cm^-3
+    //   and is the principal loss mechanism in solar cell emitters and
+    //   heavily doped BJT bases.  Sze Sec. 1.5.6 / Pierret Sec. 5.2.4.
+    //
+    //   Tabulated values at 300 K (Si: Dziewior & Schmid 1977):
+    //     Si   : C_n ~ 2.8e-31 cm^6/s,  C_p ~ 9.9e-32
+    //     GaAs : C_n ~ 1.0e-30,         C_p ~ 1.0e-30   (direct gap;
+    //                                                     much smaller in
+    //                                                     practice -- here
+    //                                                     pedagogically
+    //                                                     bumped for
+    //                                                     visibility)
+    //     Ge   : C_n ~ 8.0e-32,         C_p ~ 2.8e-31
+    double C_n_aug;      // [cm^6/s] electron Auger coefficient
+    double C_p_aug;      // [cm^6/s] hole     Auger coefficient
+
+    // ---- Impact ionization (Chynoweth) -----------------------------------
+    //
+    //   alpha(E) = alpha_inf * exp(-(E_crit / E)^m)        (Chynoweth, 1958)
+    //
+    //   alpha [cm^-1] is the ionization coefficient: number of secondary
+    //   electron-hole pairs created per cm of carrier travel. Avalanche
+    //   breakdown occurs when the ionization integral
+    //
+    //     integral_0^W alpha_n exp{int_0^x (alpha_p - alpha_n) dx'} dx --> 1
+    //
+    //   reaches unity. Sze Sec. 2.4.2 / Pierret Sec. 6.2.3.
+    //
+    //   Si (Maes/Van Overstraeten):
+    //       alpha_inf,n ~ 7.03e5 cm^-1, E_crit,n ~ 1.231e6 V/cm, m_n = 1
+    //       alpha_inf,p ~ 1.582e6,      E_crit,p ~ 2.036e6,      m_p = 1
+    //   GaAs / Ge values follow the Sze tables.
+    double alpha_inf_n;  // [cm^-1] electron Chynoweth pre-factor
+    double alpha_inf_p;  // [cm^-1] hole     Chynoweth pre-factor
+    double E_crit_n;     // [V/cm]  electron critical field
+    double E_crit_p;     // [V/cm]  hole     critical field
+    double chyn_m;       // [-]     exponent (1 for Si, ~1 for GaAs/Ge)
+
+    // ---- Band-to-band (Zener) tunneling: Kane model -----------------------
+    //
+    //   G_BTBT(E) = A_kane * E^P * exp(-B_kane / E)            (Kane 1961)
+    //
+    //   with P = 2 (direct gap) or 5/2 (indirect, phonon-assisted). The
+    //   B parameter encodes the tunneling barrier:
+    //
+    //     B_kane = (pi sqrt(m*) E_g^(3/2)) / (2 sqrt(2) q hbar)
+    //
+    //   and is therefore strongly material-dependent (small for narrow
+    //   gap / low effective mass).
+    //
+    //   References: Kane J. Phys. Chem. Solids 12 (1959) 181;
+    //               Sze Sec. 4.3 (Zener diodes); Hurkx et al. IEEE-ED 39 (1992).
+    //
+    //   Tabulated:
+    //     Si   : A ~ 3.5e21 (cm^-3 s^-1)/(V/cm)^P,  B ~ 2.25e7 V/cm
+    //     GaAs : A ~ 1.0e20 (direct, P=2),          B ~ 4.30e7
+    //     Ge   : A ~ 1.6e22,                         B ~ 1.20e7
+    bool   btbt_isDirect; // power P = 2 if direct, 5/2 if indirect
+    double A_kane;        // [cm^-3 s^-1 (V/cm)^-P]
+    double B_kane;        // [V/cm]
+
     // ---- Display ----------------------------------------------------------
     // Atom rendering colour (Si-blue, GaAs-purple, Ge-orange). Stored as raw
     // RGB bytes so this header has zero SFML dependency.
@@ -177,6 +253,12 @@ concept SemiconductorProfile = requires(const T& t) {
     { t.isDirectBandgap  } -> std::convertible_to<bool>;
     { t.v_sat_n          } -> std::convertible_to<double>;
     { t.tau_n            } -> std::convertible_to<double>;
+    { t.epsilon_r        } -> std::convertible_to<double>;
+    { t.C_n_aug          } -> std::convertible_to<double>;
+    { t.alpha_inf_n      } -> std::convertible_to<double>;
+    { t.E_crit_n         } -> std::convertible_to<double>;
+    { t.A_kane           } -> std::convertible_to<double>;
+    { t.B_kane           } -> std::convertible_to<double>;
 };
 
 // Sanity: Profile itself must satisfy the concept it advertises.
