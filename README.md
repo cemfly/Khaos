@@ -1,258 +1,207 @@
-# Semiconductor Analysis & Simulation Platform
+# Khaos -- Semiconductor Analysis & Simulation Platform
 
 [![Build & Test](https://github.com/cemfly-april2026/Khaos/actions/workflows/build.yml/badge.svg)](https://github.com/cemfly-april2026/Khaos/actions/workflows/build.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![C++20](https://img.shields.io/badge/C%2B%2B-20-blue.svg)](https://en.cppreference.com/w/cpp/20)
 
-A real-time C++20 semiconductor TCAD-style sandbox: pick a material, dope
-it, light it up, run current through it, and watch the band diagram, the
-crystal lattice and the live oscilloscope agree.
+Khaos is an interactive C++20 sandbox for semiconductor device physics. I
+built it to bridge the gap between textbook formulas and what you would
+actually see on a TCAD tool: paint a doping profile, apply a bias, and
+watch the bands bend, the carriers drift, the junction empty, and the
+terminal current settle -- all at interactive frame rates.
 
-Built with **SFML 3** (windowing + 2D rendering) and **Dear ImGui +
-ImPlot** (dockable industrial UI). Ships with a multi-material physics
-engine, a 2D drift-diffusion + thermal solver, an NPN BJT mode, and a
-GoogleTest regression suite.
+The engine ships a self-consistent Poisson + drift-diffusion solver with
+Scharfetter-Gummel discretisation, full SRH / Auger / radiative
+recombination, Chynoweth impact ionisation, Kane band-to-band tunnelling,
+Backward-Euler transient stepping and a small-signal AC probe. The UI is
+a dockable ImGui workspace driven by SFML 3.
 
-> Author: **dex / cemfly-april2026** &nbsp;&middot;&nbsp; License: **MIT**
+> Author: dex / cemfly-april2026 -- License: MIT
 
 ---
 
-## Features
+## What you can do with it
 
-### Physics core
-- **Multi-material** — Silicon, Gallium Arsenide, Germanium, each with its
-  own Varshni coefficients, effective DOS, dopant offsets, mobility
-  constants and thermal conductivity.
-- **Bandgap & carriers** — `E_g(T)` (Varshni), effective DOS `N_c(T) /
-  N_v(T)`, intrinsic carrier `n_i(T)`, Mass Action Law, Fermi-Dirac
-  occupation `f(E)`.
-- **Ionization** — full ionization (closed-form quadratic) or **incomplete
-  ionization** with self-consistent Fermi-level iteration (freeze-out).
-- **Mobility** — Matthiessen's rule (1/μ = 1/μ_lattice + 1/μ_impurity, with
-  explicit T^(-3/2) lattice and T^(3/2)/N impurity scaling) plus the
-  empirical Arora model for cross-checking.
-- **Optical absorption** — `E_photon = hc/λ`; direct-gap (GaAs) vs
-  indirect-gap (Si, Ge) carrier-explosion behaviour.
-- **Hall effect** — two-carrier coefficient `R_H = (pμ_p² − nμ_n²) /
-  (q (pμ_p + nμ_n)²)` with sign convention.
-- **Drift-Diffusion** — 2D explicit FTCS solver for `∂n/∂t = D ∇²n + G − n/τ`
-  with click-to-deposit Gaussian sources.
-- **Thermal solver** — coupled `ρCp ∂T/∂t = κ ∇²T + H_Joule + H_recomb`,
-  multi-rate operator splitting (M=4 carrier sub-steps, K=1 thermal
-  sub-step per frame), CFL clamps, Dirichlet boundaries (heat-sink
-  contacts).
-- **NPN BJT mode** — emitter / base / collector regions, `V_BE` forward
-  injection (`n_E ∝ exp(qV_BE/kT)`), `V_CE` sweep-out, collector current
-  proxy, Joule self-heating in the active path.
+- Pick a material (Si / GaAs / Ge) and adjust temperature, doping,
+  illumination wavelength and magnetic field; the band diagram, Fermi
+  level, mobilities, conductivity and Hall coefficient update on the
+  fly.
+- Open the Device Painter, brush an N / P / P+ N N+ structure onto the
+  grid, then turn on Gummel auto-solve to get the self-consistent
+  electrostatic potential, quasi-Fermi splitting and current density.
+- Slide V_bias from forward to reverse and read off the I-V curve,
+  the bent E_c / E_v / E_fn / E_fp profiles, the depletion width, the
+  small-signal G and C, and the breakdown indicators (alpha_n,
+  alpha_p, Miller M, G_BTBT).
+- Switch to transient mode, apply a step pulse or a sinusoidal AC
+  probe, and watch the terminal current ring on the oscilloscope.
+- Save the entire workspace -- doping map, bias, AC settings, transient
+  state -- to a versioned `khaos_preset.json` and reload it later.
 
-### UI / UX
-- **3-column dockable layout** built with `ImGui::DockBuilder` — left
-  Controls (25%), centre Crystal View + tabbed plots (50%), right Band
-  Diagram + tabbed Readouts (25%).
-- **Tabs**: Live Oscilloscope &middot; Spectrum (DOS + α(hν)) &middot; I-V
-  Curve (BJT Gummel) &middot; Readouts &middot; Crystal Info.
-- **CollapsingHeader sections** in Controls (Material, Thermal, Optical,
-  Magnetic, Device & BJT, Visualization) with `(?)` hover tooltips for
-  every formula -- no inline wall of text.
-- **Light scientific theme** -- white panels, dark slate text, mid-blue
-  accents (COMSOL / MATLAB / Mathematica family).
-- **Live ImPlot oscilloscope** showing σ(t), n(t), p(t) on a log-Y axis.
-- **2D heatmap overlay** (carriers OR temperature) and Lorentz vector
-  field on the crystal view.
-- **CSV export** of the current state.
-- **View → Reset Layout** menu item.
+---
 
-### Engineering
-- **Zero allocation** in the per-frame hot path -- every grid buffer and
-  every plot ring is pre-allocated.
-- **17+ GoogleTest** regression tests covering thermodynamics, ionization,
-  mobility, conductivity, optical absorption, Hall sign convention and
-  the Fermi level vs doping.
-- **Cross-platform CMake** -- works with MSYS2/MinGW on Windows and any
-  modern Linux distro that ships SFML 3 (or fetches it).
+## Physics summary
+
+Solver stack (Painter mode, auto-solve enabled):
+
+```
+   Poisson           : eps_s * grad^2 psi = -q (p - n + Nd+ - Na-)
+   Electron continuity: div(J_n)/q = (G - U_net)
+   Hole continuity   : div(J_p)/q = -(G - U_net)
+   Coupling          : Gummel outer loop, decoupled n / p / psi
+   Discretisation    : Scharfetter-Gummel flux, Bernoulli B(x) = x/(e^x-1)
+                       with IEEE-754 safe Taylor + asymptotic branches
+   Time integration  : Backward Euler, unconditionally stable
+```
+
+Loss / generation channels in `U_net - G_field`:
+
+| Mechanism                  | Formula                                                | Reference        |
+|----------------------------|--------------------------------------------------------|------------------|
+| SRH (midgap traps)         | `(np - n_i^2) / (tau_p (n+n_i) + tau_n (p+n_i))`        | Pierret 5.2.4    |
+| Auger (3-particle)         | `(C_n n + C_p p)(np - n_i^2)`                           | Sze 1.5.6        |
+| Radiative                  | `B_rad (np - n_i^2)`                                    | Schubert Eq. 2.13|
+| Chynoweth impact ionisation| `alpha_inf exp[-(E_crit/E)^m]`                          | Sze 2.4.2        |
+| Kane band-to-band tunnel   | `A E^P exp(-B/E)`, P = 2 (direct) or 5/2 (indirect)     | Hurkx IEEE-ED 39 |
+
+Material parameters come from Sze, Pierret, Kasap and the Ioffe handbook;
+each profile carries its own Varshni constants, Matthiessen + Caughey-Thomas
+mobility coefficients, dielectric constant, SRH / Auger / radiative
+constants, and Chynoweth / Kane fits.
 
 ---
 
 ## Build
 
-### Requirements
-- C++20 compiler (GCC ≥ 13, Clang ≥ 16, MSVC 19.36+)
-- CMake ≥ 3.20
-- SFML 3 (graphics / window / system)
-- Internet access on first configure (CMake fetches Dear ImGui, ImGui-SFML
-  and ImPlot via `FetchContent`).
+### Prerequisites
 
-The other dependencies are vendored automatically via FetchContent and do
-not need to be installed by the user:
-- Dear ImGui v1.91.6-docking
-- ImGui-SFML v3.0
-- ImPlot v0.16
-- GoogleTest v1.14.0 (only if `-DBUILD_TESTS=ON`)
+- A C++20 compiler (GCC 13+, Clang 17+ or MSVC 19.36+)
+- CMake 3.20+, Ninja recommended
+- SFML 3.x development headers
+- A TTF font placed at `assets/font.ttf` (any sans-serif works; the file
+  is `.gitignore`d on purpose to avoid shipping a licence-encumbered font)
+
+All other dependencies (Dear ImGui, ImGui-SFML, ImPlot, nlohmann/json and
+GoogleTest when tests are enabled) are pulled in by `FetchContent` -- no
+manual setup required.
 
 ### Linux
 
 ```bash
-# Distros that ship SFML 3 in their package manager
-sudo apt install build-essential cmake ninja-build libsfml-dev   # 24.10+
-# Or: sudo dnf install gcc-c++ cmake ninja-build SFML-devel
-
-cmake -S . -B build -G Ninja -DBUILD_TESTS=ON
-cmake --build build -j
-ctest --test-dir build --output-on-failure
+sudo apt install build-essential cmake ninja-build libsfml-dev \
+                 libfreetype-dev libfontconfig1-dev
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=ON
+cmake --build build
 ./build/SemiconductorSim
 ```
 
-If your distro is too old for SFML 3, let CMake fetch and build it:
+### Windows (MSYS2 / UCRT64)
 
 ```bash
-cmake -S . -B build -G Ninja -DFETCH_SFML=ON -DBUILD_TESTS=ON
-cmake --build build -j
-```
-
-### Windows (MSYS2 + UCRT64 -- the workflow shipped with this repo)
-
-```bash
-# In a fresh MSYS2 UCRT64 shell:
-pacman -S --needed mingw-w64-ucrt-x86_64-gcc \
-                   mingw-w64-ucrt-x86_64-cmake \
-                   mingw-w64-ucrt-x86_64-ninja \
-                   mingw-w64-ucrt-x86_64-sfml
-
-cmake -S . -B build -G Ninja -DBUILD_TESTS=ON
-cmake --build build -j
-
+pacman -S mingw-w64-ucrt-x86_64-gcc \
+          mingw-w64-ucrt-x86_64-cmake \
+          mingw-w64-ucrt-x86_64-ninja \
+          mingw-w64-ucrt-x86_64-sfml
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=ON
+cmake --build build
 ./build/SemiconductorSim.exe
 ```
 
-The CMake post-build step automatically copies every required UCRT64 DLL
-(`libstdc++-6.dll`, `libgcc_s_seh-1.dll`, `libfreetype-6.dll`, ...) next to
-the binary so the executable runs both from the shell and from a
-double-click in Explorer.
+### Optional: sanitiser build
 
-> Note for Windows 11 users with **Smart App Control** turned on: the
-> first launch may be blocked because the freshly-built binary is
-> unsigned. Right-click → Properties → "Run anyway", or disable Smart App
-> Control (Settings → Privacy & Security → Windows Security → App &
-> browser control).
+```bash
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+      -DBUILD_TESTS=ON -DUSE_SANITIZER=ON
+cmake --build build && ctest --test-dir build --output-on-failure
+```
 
-### Font asset
-
-Drop a TrueType file at `assets/font.ttf` (any reasonable Latin font
-will do -- Roboto, DejaVu Sans, Liberation Sans, Inter, ...). Most
-systems already have a usable system font; the loader will pick one up
-automatically if `assets/font.ttf` does not exist.
+`USE_SANITIZER=ON` adds `-fsanitize=address,undefined` to the compile
+and link flags. The CI on Linux runs this configuration on every push.
 
 ---
 
-## Project layout
+## Tests
 
+```bash
+cmake --build build --target physics_tests
+ctest --test-dir build --output-on-failure
 ```
-.
-├── CMakeLists.txt
-├── LICENSE
-├── README.md
-├── assets/
-│   └── README.md              # font.ttf goes here (gitignored)
-├── cmake/
-│   └── copy_runtime_dlls.cmake
-├── src/
-│   ├── main.cpp               # window + ImGui dock space + panels
-│   ├── Palette.hpp            # shared colour palette + helpers
-│   ├── Material.hpp/cpp       # Si / GaAs / Ge profiles
-│   ├── PhysicsEngine.hpp/cpp  # bandgap, carriers, mobility, σ, Hall, optical
-│   ├── DriftDiffusion.hpp/cpp # 2D coupled electrothermal solver + BJT
-│   ├── CrystalView.hpp/cpp    # SFML render-to-texture for the lattice
-│   └── BandView.hpp/cpp       # SFML render-to-texture for the band diagram
-└── tests/
-    └── test_physics.cpp       # GoogleTest regression suite
-```
+
+The suite covers every shipped physics routine: intrinsic carrier
+concentration, ionisation, Matthiessen / Arora mobility, velocity
+saturation, SRH / Auger / radiative recombination at equilibrium and
+under injection, Chynoweth and Kane monotonicity, built-in potential,
+ohmic-contact boundary asymmetry, depletion-capacitance scaling, and a
+programmatic PN-junction integration test that reads `V_bi` back from a
+painted device and matches it against `V_T ln(Nd Na / n_i^2)` to within
+five percent.
 
 ---
 
-## Quick tour of the UI
+## Repository layout
 
-| Panel             | Purpose                                                      |
-| ----------------- | ------------------------------------------------------------ |
-| Controls          | Material picker, T / N / λ / B sliders, BJT bias, etc.       |
-| Crystal View      | Lattice atoms, carriers, heatmap overlay, Lorentz vectors   |
-| Live Oscilloscope | σ(t), n(t), p(t) on a real-time log-Y plot                   |
-| Spectrum          | Density of states + absorption coefficient                   |
-| I-V Curve         | BJT Gummel I_C(V_BE)                                         |
-| Band Diagram      | E_v / E_c / E_f / dopant levels + Fermi-Dirac curve          |
-| Readouts          | Live numerical state of every observable                     |
-| Crystal Info      | Drift-diffusion + thermal grid statistics                    |
-
-### Things to try
-
-1. **Freeze-out demo** — Si, n-type, N=10¹⁶, drag T down to 50 K with
-   *Incomplete ionization* on. Watch n collapse far below N_d and the
-   Fermi level pin to the donor level.
-
-2. **GaAs vs Si optical** — switch material to GaAs, light source on,
-   λ ≈ 500 nm. Compare Δn to the same setup in Si: GaAs's direct bandgap
-   produces a ~10× larger excess.
-
-3. **Thermal runaway in BJT** — Material: GaAs, Device: NPN BJT,
-   V_CE ≈ 4 V, drag V_BE up from 0 to 0.7 V. Switch the heatmap layer to
-   Thermal: see the base/collector region go from blue to yellow to red.
-
-4. **Drift-diffusion** — bulk mode, click anywhere on the crystal view.
-   Each click deposits a Gaussian carrier source which diffuses outward
-   on the lifetime time-scale. The σ(t) trace responds in real time.
-
-5. **Hall sign change** — n-type → R_H < 0, p-type → R_H > 0,
-   intrinsic → R_H still negative because μ_n > μ_p.
+```
+src/
+  PhysicsEngine.{hpp,cpp}     band structure, mobility, recombination,
+                              capacitance helpers, Bernoulli function
+  Material.{hpp,cpp}          Si / GaAs / Ge profiles, concept-validated
+  DriftDiffusion.{hpp,cpp}    Poisson + SG continuity, Gummel, transient,
+                              AC probe, painter, electric field, cuts
+  CrystalView.{hpp,cpp}       crystal lattice + carrier transport view
+  BandView.{hpp,cpp}          flat and spatial (bent-band) diagrams
+  Preset.{hpp,cpp}            versioned JSON save/load (nlohmann/json)
+  main.cpp                    ImGui dockspace + windows
+tests/
+  test_physics.cpp            GoogleTest regression suite
+assets/                       fonts, colormaps (font itself gitignored)
+cmake/                        helper scripts (DLL bundling on MSYS2)
+.github/workflows/build.yml   CI: Linux Release, Linux ASan+UBSan,
+                              Windows UCRT64, clang-format dry-run
+```
 
 ---
 
 ## Roadmap
 
-The project follows a phased release plan. Each phase ships a self-contained
-chunk of TCAD physics driven by a clear visualisation goal; phases stack on
-top of each other (every later phase keeps the earlier ones' UI intact).
-
-### Recently delivered
+### Delivered
 
 | Phase | Focus                                       | Highlights                                                                                                              |
 | :---: | ------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
 | 1     | Device Painter + equilibrium Poisson        | Click-and-drag dopant brush; Gauss-Seidel Poisson on the painted N<sub>d</sub>/N<sub>a</sub> grid.                       |
 | 2     | Spatial BandView + breakdown panel          | Bent E<sub>c</sub>(x), E<sub>v</sub>(x), &#124;E&#124;(x) along a horizontal cut; Auger, Chynoweth, Kane BTBT plots.    |
-| 3     | **Poisson-coupled drift-diffusion (Gummel)**| Outer Poisson &harr; Continuity loop with quasi-Fermi splitting (&phi;<sub>n</sub>, &phi;<sub>p</sub>); 3D heatmap.     |
-| 4     | **Scharfetter-Gummel + transient + AC**     | Robust SG flux + Bernoulli function; Backward-Euler transient; Caughey-Thomas high-field saturation; AC small-signal.    |
-| 4+    | **SRH / Auger / BTBT recombination**        | Full detailed-balance R<sub>SRH</sub>, three-particle R<sub>Aug</sub>, Kane band-to-band tunnelling source.              |
-| 5     | **Wachutka electrothermal + heterojunctions** | Per-cell &rho;C<sub>p</sub>&part;<sub>t</sub>T = &nabla;&middot;(&kappa;&nabla;T) + H with Joule + recombination heat; Anderson-rule &Delta;E<sub>c</sub>/&Delta;E<sub>v</sub> for Si/Ge/GaAs heteroepitaxy.|
-| 6     | **Radiative recombination + JSON presets** | Direct-gap R<sub>rad</sub> = B<sub>rad</sub>(np - n<sub>i</sub><sup>2</sup>) wired into the continuity source (Si / GaAs / Ge per-material B); versioned `khaos_preset.json` save/load via `nlohmann/json` for the painter doping map, V<sub>a</sub>, AC + transient settings. |
+| 3     | Poisson-coupled drift-diffusion (Gummel)    | Outer Poisson &harr; Continuity loop with quasi-Fermi splitting (&phi;<sub>n</sub>, &phi;<sub>p</sub>); 3D heatmap.     |
+| 4     | Scharfetter-Gummel + transient + AC         | Bernoulli flux + Backward-Euler stepping; Caughey-Thomas saturation; small-signal G, C estimators.                       |
+| 4+    | Full recombination triplet                  | Detailed-balance R<sub>SRH</sub>, three-particle R<sub>Aug</sub>, radiative R<sub>rad</sub>, Kane G<sub>BTBT</sub>.      |
+| 5     | Wachutka electrothermal + heterojunctions   | &rho;C<sub>p</sub>&part;<sub>t</sub>T = &nabla;&middot;(&kappa;&nabla;T) + H with Joule + recombination heat; Anderson-rule band offsets. |
+| 6     | Continuous-flow particle view + JSON presets| Absorbing / injecting boundaries, depletion-region culling, drift-dominant Brownian; versioned `khaos_preset.json` save/load. |
 
 ### Planned
 
 | Phase | Focus                                       | Notes                                                                                                                                                                  |
 | :---: | ------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 7     | Newton-coupled Poisson-DD                   | Drop-in alternative to the decoupled Gummel iteration with Jacobian-free Newton-Krylov for stiff devices (avalanche, deep submicron).                                 |
+| 7     | Newton-coupled Poisson-DD                   | Jacobian-free Newton-Krylov alternative to the decoupled Gummel iteration for stiff devices (avalanche, deep submicron).                                              |
 | 8     | Adaptive non-uniform grid                   | Local refinement around junctions and depletion edges; doubles spatial accuracy at the same cell count.                                                               |
-| 9     | Frequency-domain AC sweeper                 | Phasor-domain solve of small-signal G(&omega;), C(&omega;), Y/Z parameters; sweep export to CSV / Touchstone.                                                          |
+| 9     | Frequency-domain AC sweeper                 | Phasor-domain small-signal G(&omega;), C(&omega;), Y/Z parameters; sweep export to CSV / Touchstone.                                                                  |
 | 10    | Compact-model extraction                    | Automatic fit of BJT &beta;, V<sub>A</sub>, V<sub>BE,on</sub> and diode I<sub>S</sub>, n, R<sub>s</sub> from the painted-device output -- bridge to SPICE-style design. |
-
-Anything in **Recently delivered** is fully implemented and covered by the
-GoogleTest suite; **Planned** items have agreed designs but no implementation
-yet -- contributions welcome (see [CONTRIBUTING.md](CONTRIBUTING.md)).
 
 ---
 
 ## References
 
-- C. Kittel, *Introduction to Solid State Physics*, 8th ed., Wiley.
-- S. O. Kasap, *Principles of Electronic Materials and Devices*, 4th ed.
 - Sze & Ng, *Physics of Semiconductor Devices*, 3rd ed., Wiley.
-- Arora, Hauser, Roulston, "Electron and hole mobilities in silicon",
-  IEEE TED-29 (1982).
 - Pierret, *Semiconductor Device Fundamentals*, Addison-Wesley.
 - Selberherr, *Analysis and Simulation of Semiconductor Devices*, Springer.
-- Wachutka, "Rigorous thermodynamic treatment of heat generation and
-  conduction in semiconductor device modeling", IEEE TCAD 9 (1990) 1141.
-- Scharfetter & Gummel, "Large-signal analysis of a silicon Read diode
-  oscillator", IEEE TED 16 (1969) 64.
-- Anderson, "Experiments on Ge-GaAs heterojunctions", Solid-State Electronics
-  5 (1962) 341.
+- Kasap, *Principles of Electronic Materials and Devices*, 4th ed.
+- Kittel, *Introduction to Solid State Physics*, 8th ed., Wiley.
+- Pankove, *Optical Processes in Semiconductors*, Dover.
+- Schubert, *Light-Emitting Diodes*, 2nd ed., Cambridge.
+- Scharfetter & Gummel, *IEEE TED* 16 (1969) 64.
+- Caughey & Thomas, *Proc. IEEE* 55 (1967) 2192.
+- Wachutka, *IEEE TCAD* 9 (1990) 1141.
+- Hurkx, Klaassen, Knuvers, *IEEE TED* 39 (1992) 331.
+- Arora, Hauser, Roulston, *IEEE TED* 29 (1982) 292.
+- Van Overstraeten & de Man, *Solid-State Electronics* 13 (1970) 583.
+- Anderson, *Solid-State Electronics* 5 (1962) 341.
 
 ---
 
@@ -260,5 +209,5 @@ yet -- contributions welcome (see [CONTRIBUTING.md](CONTRIBUTING.md)).
 
 MIT -- see [LICENSE](LICENSE).
 
-Contributions of any size are welcome; please read
-[CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
+Contributions are welcome. Please read [CONTRIBUTING.md](CONTRIBUTING.md)
+before opening a pull request.
