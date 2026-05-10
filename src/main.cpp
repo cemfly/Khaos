@@ -390,6 +390,27 @@ struct UIState {
     // -- Phase 3: 3D Topology window --------------------------------------
     int         topo3DField       = 0;         // 0=psi, 1=n, 2=p, 3=|E|
 
+    // -- Phase 4: Transient / AC ------------------------------------------
+    bool        transientEnabled  = false;
+    float       logDt             = -9.0f;     // log10(dt[s]); -9 = 1 ns
+    bool        acProbeEnabled    = false;
+    float       acFreq_Hz         = 1.0e6f;    // 1 MHz default
+    float       acAmp_V           = 0.005f;    // 5 mV
+    bool        stepPulseArmed    = false;
+    float       stepPulseAmp      = 0.5f;      // forward step amplitude
+    double      stepPulseT0       = 0.0;       // time of last step
+    bool        stepPulseFired    = false;
+
+    // Oscilloscope ring buffer of (t, J)
+    std::vector<float> oscTime;
+    std::vector<float> oscCurrent;
+
+    // Small-signal readouts
+    double      ssG_DC            = 0.0;       // S/cm^2
+    double      ssC_dep           = 0.0;       // F/cm^2 (per unit area)
+    double      ssC_diff          = 0.0;       // F/cm^2
+    double      ssV_bi            = 0.0;       // built-in potential
+
     std::string statusMessage;
     sf::Clock   statusClock;
     float       statusLifetime = 0.0f;
@@ -764,6 +785,7 @@ void drawControlsWindow(PhysicsEngine& physics,
                 physics.getElectronMobility(),
                 physics.getHoleMobility(),
                 mat,
+                physics.getTemperature(),
                 50, ui.gummelPoissonInner, ui.gummelContinuityInner,
                 ui.gummelOmegaPsi, ui.gummelOmegaPhi);
             ui.flashStatus("Gummel 50-outer refinement done");
@@ -771,6 +793,130 @@ void drawControlsWindow(PhysicsEngine& physics,
 
         ImGui::TextDisabled("psi residual: %.3e V",  ui.gummelResidual);
         ImGui::TextDisabled("J terminal:   %.3e A/cm^2", ui.lastJ_terminal);
+    }
+
+    // =====================================================================
+    // Transient (BE) and AC probe  [Phase 4]
+    // =====================================================================
+    if (ImGui::CollapsingHeader("Transient & AC"))
+    {
+        if (ImGui::Checkbox("Transient (Backward Euler)",
+                            &ui.transientEnabled))
+        {
+            dd.setTransientEnabled(ui.transientEnabled);
+            if (ui.transientEnabled) {
+                ui.oscTime.clear();
+                ui.oscCurrent.clear();
+                dd.resetSimulationTime();
+            }
+        }
+        HelpMarker(
+            "Adds (n_new - n_old)/dt to continuity. Backward Euler is "
+            "unconditionally stable: dt may be picked freely from "
+            "picoseconds to milliseconds.\n"
+            "Reset clears the simulation clock.");
+
+        if (ImGui::SliderFloat("log10 dt [s]", &ui.logDt, -15.0f, -3.0f,
+                               "%.2f"))
+        {
+            dd.setTimeStep(std::pow(10.0, static_cast<double>(ui.logDt)));
+        }
+        ImGui::TextDisabled("dt = %.3e s   |   t_sim = %.6e s",
+                            dd.timeStep(), dd.simulationTime());
+
+        ImGui::SeparatorText("Step pulse");
+        ImGui::SliderFloat("Step amplitude [V]", &ui.stepPulseAmp,
+                           -2.0f, 2.0f, "%.3f");
+        if (ImGui::Button("Arm step at t = next frame")) {
+            ui.stepPulseArmed = true;
+            ui.stepPulseFired = false;
+            ui.flashStatus("Step pulse armed");
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel")) {
+            ui.stepPulseArmed = false;
+            ui.stepPulseFired = false;
+        }
+        ImGui::SameLine();
+        ImGui::TextDisabled(ui.stepPulseFired ? "fired"
+                            : (ui.stepPulseArmed ? "armed" : "idle"));
+
+        ImGui::SeparatorText("AC probe");
+        if (ImGui::Checkbox("AC probe", &ui.acProbeEnabled)) {
+            dd.setACProbe(ui.acProbeEnabled,
+                          ui.acFreq_Hz, ui.acAmp_V);
+        }
+        HelpMarker(
+            "Rides a small sine on top of V_a:\n"
+            "  V_a(t) = V_DC + amp * sin(2 pi f t)\n"
+            "Used with transient stepping to read C, G off the live "
+            "oscilloscope. Frequencies above 1/(2 pi tau_recomb) probe "
+            "the depletion (junction) capacitance; lower frequencies "
+            "see the diffusion (storage) capacitance too.");
+
+        if (ImGui::SliderFloat("AC freq [Hz]", &ui.acFreq_Hz,
+                               1.0f, 1.0e10f, "%.2e",
+                               ImGuiSliderFlags_Logarithmic)) {
+            dd.setACProbe(ui.acProbeEnabled, ui.acFreq_Hz, ui.acAmp_V);
+        }
+        if (ImGui::SliderFloat("AC amplitude [V]", &ui.acAmp_V,
+                               0.0001f, 0.1f, "%.4f",
+                               ImGuiSliderFlags_Logarithmic)) {
+            dd.setACProbe(ui.acProbeEnabled, ui.acFreq_Hz, ui.acAmp_V);
+        }
+    }
+
+    // =====================================================================
+    // Small-signal (DC perturbation C, G)  [Phase 4 bonus]
+    // =====================================================================
+    if (ImGui::CollapsingHeader("Small-Signal (DC perturbation)"))
+    {
+        const auto&  mat = physics.getMaterial();
+        const double n_i = physics.getIntrinsicCarrier();
+        const double V_T_local =
+            PhysicsEngine::thermalVoltage(physics.getTemperature());
+
+        // Compute V_bi from peak Nd / Na on the painter map, simply
+        // because the user might paint asymmetric structures.
+        double Nd_max = 0.0, Na_max = 0.0;
+        for (int j = 0; j < dd.height(); ++j) {
+            for (int i = 0; i < dd.width(); ++i) {
+                Nd_max = std::max(Nd_max, dd.donorAt   (i, j));
+                Na_max = std::max(Na_max, dd.acceptorAt(i, j));
+            }
+        }
+        ui.ssV_bi = PhysicsEngine::builtInPotential(Nd_max, Na_max,
+                                                    n_i, V_T_local);
+
+        ImGui::Text("V_bi (max-Nd vs max-Na): %.3f V", ui.ssV_bi);
+        ImGui::Text("Nd_max = %.2e   Na_max = %.2e", Nd_max, Na_max);
+
+        if (ImGui::Button("Measure G_DC (perturbation +/-5 mV)")) {
+            ui.ssG_DC = dd.smallSignalConductance(
+                n_i, V_T_local, mat.epsilon_r, mat,
+                physics.getTemperature(), 0.005);
+            ui.flashStatus("G_DC measured");
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Update C estimates")) {
+            // C_dep at the *current* V_bias (cm^2-normalised).
+            ui.ssC_dep = PhysicsEngine::depletionCapacitanceFlat(
+                Nd_max, Na_max, ui.ssV_bi,
+                static_cast<double>(ui.V_bias),
+                mat.epsilon_r, 1.0);
+            ui.ssC_diff = PhysicsEngine::diffusionCapacitance(
+                std::max(ui.lastJ_terminal, 0.0),
+                mat.tau_p, V_T_local);
+            ui.flashStatus("Capacitances updated");
+        }
+
+        ImGui::TextDisabled("G_DC   = %.3e S/cm^2",  ui.ssG_DC);
+        ImGui::TextDisabled("C_dep  = %.3e F/cm^2",  ui.ssC_dep);
+        ImGui::TextDisabled("C_diff = %.3e F/cm^2",  ui.ssC_diff);
+        ImGui::TextDisabled("C_tot  = %.3e F/cm^2",
+                            ui.ssC_dep + ui.ssC_diff);
+        if (ui.ssG_DC > 0.0)
+            ImGui::TextDisabled("R_DC   = %.3e Ohm.cm^2", 1.0 / ui.ssG_DC);
     }
 
     // =====================================================================
@@ -926,47 +1072,97 @@ void drawReadoutsWindow(const PhysicsEngine& physics,
 // =============================================================================
 // Live oscilloscope
 // =============================================================================
-void drawLiveOscilloscope(const PhysicsEngine& physics, float dt) {
+void drawLiveOscilloscope(const PhysicsEngine& physics,
+                          const DriftDiffusion& dd,
+                          UIState& ui,
+                          float dt)
+{
     if (!ImGui::Begin("Live Oscilloscope")) { ImGui::End(); return; }
 
-    static std::vector<float> ts, sigmas, ns, ps;
-    static float t_now = 0.0f;
-    t_now += dt;
-    ts    .push_back(t_now);
-    sigmas.push_back(static_cast<float>(physics.getConductivity()));
-    ns    .push_back(static_cast<float>(physics.getTotalElectronConc()));
-    ps    .push_back(static_cast<float>(physics.getTotalHoleConc()));
+    // Mode banner: transient mode reads ui.oscTime / oscCurrent populated
+    // by the main loop; legacy mode keeps the wall-clock physics traces.
+    const bool transient = ui.transientEnabled
+                        && dd.deviceMode() == DeviceMode::Painter;
 
-    if (ts.size() > kOscilloscopeMaxSamples) {
-        const std::size_t excess = ts.size() - kOscilloscopeMaxSamples;
-        ts    .erase(ts    .begin(), ts    .begin() + excess);
-        sigmas.erase(sigmas.begin(), sigmas.begin() + excess);
-        ns    .erase(ns    .begin(), ns    .begin() + excess);
-        ps    .erase(ps    .begin(), ps    .begin() + excess);
+    if (ImGui::BeginTabBar("##scope_tabs")) {
+        if (ImGui::BeginTabItem(transient
+                                ? "Transient J(t)" : "Conductivity & n,p"))
+        {
+            if (transient) {
+                if (ImPlot::BeginPlot("Terminal current",
+                    ImVec2(-1.0f, ImGui::GetContentRegionAvail().y - 8.0f)))
+                {
+                    ImPlot::SetupAxes("t_sim [s]", "J [A/cm^2]",
+                                      ImPlotAxisFlags_AutoFit,
+                                      ImPlotAxisFlags_AutoFit);
+                    if (!ui.oscTime.empty()) {
+                        ImPlot::PlotLine("J(t)",
+                            ui.oscTime.data(),
+                            ui.oscCurrent.data(),
+                            static_cast<int>(ui.oscTime.size()));
+                    }
+                    if (ui.stepPulseFired) {
+                        const double xs[2] = {ui.stepPulseT0, ui.stepPulseT0};
+                        const double ys[2] = {-1e30, 1e30};
+                        ImPlot::PlotLine("step", xs, ys, 2);
+                    }
+                    ImPlot::EndPlot();
+                }
+                ImGui::TextDisabled(
+                    "Samples: %zu  |  t = %.4e s  |  V_a = %.4f V  |  "
+                    "J = %.3e A/cm^2",
+                    ui.oscTime.size(),
+                    dd.simulationTime(),
+                    static_cast<double>(dd.appliedBias()),
+                    ui.lastJ_terminal);
+            } else {
+                static std::vector<float> ts, sigmas, ns, ps;
+                static float t_now = 0.0f;
+                t_now += dt;
+                ts    .push_back(t_now);
+                sigmas.push_back(static_cast<float>(physics.getConductivity()));
+                ns    .push_back(static_cast<float>(physics.getTotalElectronConc()));
+                ps    .push_back(static_cast<float>(physics.getTotalHoleConc()));
+
+                if (ts.size() > kOscilloscopeMaxSamples) {
+                    const std::size_t excess = ts.size() - kOscilloscopeMaxSamples;
+                    ts    .erase(ts    .begin(), ts    .begin() + excess);
+                    sigmas.erase(sigmas.begin(), sigmas.begin() + excess);
+                    ns    .erase(ns    .begin(), ns    .begin() + excess);
+                    ps    .erase(ps    .begin(), ps    .begin() + excess);
+                }
+
+                if (ImPlot::BeginPlot("Conductivity",
+                    ImVec2(-1.0f, ImGui::GetContentRegionAvail().y * 0.55f)))
+                {
+                    ImPlot::SetupAxes("t [s]", "sigma [S/cm]",
+                                      ImPlotAxisFlags_AutoFit, ImPlotAxisFlags_AutoFit);
+                    ImPlot::SetupAxisScale(ImAxis_Y1, ImPlotScale_Log10);
+                    ImPlot::PlotLine("sigma(t)", ts.data(), sigmas.data(),
+                                     static_cast<int>(ts.size()));
+                    ImPlot::EndPlot();
+                }
+                if (ImPlot::BeginPlot("Carrier concentrations",
+                                      ImVec2(-1.0f, -1.0f)))
+                {
+                    ImPlot::SetupAxes("t [s]", "carriers [cm^-3]",
+                                      ImPlotAxisFlags_AutoFit, ImPlotAxisFlags_AutoFit);
+                    ImPlot::SetupAxisScale(ImAxis_Y1, ImPlotScale_Log10);
+                    ImPlot::PlotLine("n(t)", ts.data(), ns.data(),
+                                     static_cast<int>(ts.size()));
+                    ImPlot::PlotLine("p(t)", ts.data(), ps.data(),
+                                     static_cast<int>(ts.size()));
+                    ImPlot::EndPlot();
+                }
+            }
+            ImGui::EndTabItem();
+        }
+        ImGui::EndTabBar();
     }
 
-    if (ImPlot::BeginPlot("Conductivity",
-                          ImVec2(-1.0f, ImGui::GetContentRegionAvail().y * 0.55f)))
-    {
-        ImPlot::SetupAxes("t [s]", "sigma [S/cm]",
-                          ImPlotAxisFlags_AutoFit, ImPlotAxisFlags_AutoFit);
-        ImPlot::SetupAxisScale(ImAxis_Y1, ImPlotScale_Log10);
-        ImPlot::PlotLine("sigma(t)", ts.data(), sigmas.data(),
-                         static_cast<int>(ts.size()));
-        ImPlot::EndPlot();
-    }
-
-    if (ImPlot::BeginPlot("Carrier concentrations",
-                          ImVec2(-1.0f, -1.0f)))
-    {
-        ImPlot::SetupAxes("t [s]", "carriers [cm^-3]",
-                          ImPlotAxisFlags_AutoFit, ImPlotAxisFlags_AutoFit);
-        ImPlot::SetupAxisScale(ImAxis_Y1, ImPlotScale_Log10);
-        ImPlot::PlotLine("n(t)", ts.data(), ns.data(),
-                         static_cast<int>(ts.size()));
-        ImPlot::PlotLine("p(t)", ts.data(), ps.data(),
-                         static_cast<int>(ts.size()));
-        ImPlot::EndPlot();
+    if (ImGui::SmallButton("Clear scope")) {
+        ui.oscTime.clear();
+        ui.oscCurrent.clear();
     }
 
     ImGui::End();
@@ -1804,21 +2000,52 @@ int main() {
                 || std::abs(ui.V_bias) > 1.0e-4f;
 
             if (useGummel) {
-                ui.gummelResidual = dd->solveGummel(
-                    n_i, V_T, mat.epsilon_r,
-                    physics->getElectronMobility(),
-                    physics->getHoleMobility(),
-                    mat,
-                    ui.gummelOuter,
-                    ui.gummelPoissonInner,
-                    ui.gummelContinuityInner,
-                    ui.gummelOmegaPsi,
-                    ui.gummelOmegaPhi);
+                if (ui.transientEnabled) {
+                    // Transient (Backward Euler) -- AC probe & step
+                    // pulse modify V_a inside stepTransient.
+                    if (ui.stepPulseArmed && !ui.stepPulseFired) {
+                        const float V_target = ui.V_bias + ui.stepPulseAmp;
+                        dd->setAppliedBias(V_target);
+                        ui.stepPulseFired = true;
+                        ui.stepPulseT0    = dd->simulationTime();
+                    }
+                    ui.gummelResidual = dd->stepTransient(
+                        n_i, V_T, mat.epsilon_r, mat,
+                        physics->getTemperature(),
+                        ui.gummelOuter,
+                        ui.gummelPoissonInner,
+                        ui.gummelContinuityInner,
+                        ui.gummelOmegaPsi,
+                        ui.gummelOmegaPhi);
+                    if (ui.acProbeEnabled) ui.V_bias = dd->appliedBias();
+                } else {
+                    ui.gummelResidual = dd->solveGummel(
+                        n_i, V_T, mat.epsilon_r,
+                        physics->getElectronMobility(),
+                        physics->getHoleMobility(),
+                        mat,
+                        physics->getTemperature(),
+                        ui.gummelOuter,
+                        ui.gummelPoissonInner,
+                        ui.gummelContinuityInner,
+                        ui.gummelOmegaPsi,
+                        ui.gummelOmegaPhi);
+                }
                 ui.poissonResidual = ui.gummelResidual;
                 ui.lastJ_terminal  = dd->terminalCurrentDensity(
                     n_i, V_T,
                     physics->getElectronMobility(),
                     physics->getHoleMobility());
+
+                // Append to oscilloscope ring (cap at ~3000 samples).
+                ui.oscTime.push_back(
+                    static_cast<float>(dd->simulationTime()));
+                ui.oscCurrent.push_back(
+                    static_cast<float>(ui.lastJ_terminal));
+                if (ui.oscTime.size() > 3000) {
+                    ui.oscTime.erase   (ui.oscTime.begin());
+                    ui.oscCurrent.erase(ui.oscCurrent.begin());
+                }
             } else if (ui.poissonAutoSolve) {
                 ui.poissonResidual = dd->solvePoisson(
                     n_i, V_T, mat.epsilon_r,
@@ -1858,7 +2085,7 @@ int main() {
 
         drawControlsWindow     (*physics, *dd, ui);
         drawReadoutsWindow     (*physics, *dd);
-        drawLiveOscilloscope   (*physics, dt);
+        drawLiveOscilloscope   (*physics, *dd, ui, dt);
         drawSpectrumWindow     (*physics);
         drawIVCurveWindow      (*dd);
         drawCrystalViewWindow  (*crystal, *dd, *physics, ui);

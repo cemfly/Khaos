@@ -32,6 +32,11 @@ DriftDiffusion::DriftDiffusion(int gridW, int gridH)
     , m_phi_n   (static_cast<std::size_t>(gridW * gridH), 0.0f)
     , m_phi_p   (static_cast<std::size_t>(gridW * gridH), 0.0f)
     , m_contact (static_cast<std::size_t>(gridW * gridH), 0u)
+    // Phase 4: density buffers (SG continuity primary unknowns)
+    , m_n_dens     (static_cast<std::size_t>(gridW * gridH), 0.0f)
+    , m_p_dens     (static_cast<std::size_t>(gridW * gridH), 0.0f)
+    , m_n_dens_old (static_cast<std::size_t>(gridW * gridH), 0.0f)
+    , m_p_dens_old (static_cast<std::size_t>(gridW * gridH), 0.0f)
 {}
 
 
@@ -427,18 +432,24 @@ void DriftDiffusion::paintBrush(float u, float v,
 }
 
 void DriftDiffusion::clearDoping() noexcept {
-    std::fill(m_Nd.begin(),       m_Nd.end(),       0.0f);
-    std::fill(m_Na.begin(),       m_Na.end(),       0.0f);
-    std::fill(m_psi.begin(),      m_psi.end(),      0.0f);
-    std::fill(m_psi_next.begin(), m_psi_next.end(), 0.0f);
-    std::fill(m_phi_n.begin(),    m_phi_n.end(),    0.0f);
-    std::fill(m_phi_p.begin(),    m_phi_p.end(),    0.0f);
-    std::fill(m_contact.begin(),  m_contact.end(),  0u);
+    std::fill(m_Nd.begin(),         m_Nd.end(),         0.0f);
+    std::fill(m_Na.begin(),         m_Na.end(),         0.0f);
+    std::fill(m_psi.begin(),        m_psi.end(),        0.0f);
+    std::fill(m_psi_next.begin(),   m_psi_next.end(),   0.0f);
+    std::fill(m_phi_n.begin(),      m_phi_n.end(),      0.0f);
+    std::fill(m_phi_p.begin(),      m_phi_p.end(),      0.0f);
+    std::fill(m_n_dens.begin(),     m_n_dens.end(),     0.0f);
+    std::fill(m_p_dens.begin(),     m_p_dens.end(),     0.0f);
+    std::fill(m_n_dens_old.begin(), m_n_dens_old.end(), 0.0f);
+    std::fill(m_p_dens_old.begin(), m_p_dens_old.end(), 0.0f);
+    std::fill(m_contact.begin(),    m_contact.end(),    0u);
     if (m_mode == DeviceMode::Painter) {
         std::fill(m_region.begin(), m_region.end(),
                   static_cast<std::uint8_t>(CellRegion::Bulk));
     }
     m_contacts_dirty = true;
+    m_dens_seeded    = false;
+    m_sim_time       = 0.0;
 }
 
 double DriftDiffusion::netDopingAt(int i, int j) const noexcept {
@@ -482,6 +493,9 @@ double DriftDiffusion::solvePoisson(double n_i_cm3,
 {
     // Public Phase-1 entry point. Reads m_phi_n / m_phi_p (0 in pure
     // equilibrium -> identical to the original Boltzmann formulation).
+    // Refresh contact BCs first so stale Gummel state can't leak in
+    // (Phase 4 added contact tagging that solvePoissonInner now obeys).
+    applyContactBoundaries(n_i_cm3, V_T);
     return solvePoissonInner(n_i_cm3, V_T, epsilon_r, iterations, omega);
 }
 
@@ -658,8 +672,10 @@ bool DriftDiffusion::sampleDopingCut(
 // =============================================================================
 void DriftDiffusion::setAppliedBias(float V_a) noexcept {
     m_V_bias = std::clamp(V_a, -50.0f, 5.0f);
-    // Bias change requires re-applying contact BCs at the start of the
-    // next solveGummel call; nothing else to do.
+    // While AC is sweeping, the user dragging the bias slider should
+    // re-centre the sine on the new DC point; otherwise the next step
+    // would clobber the slider value with V_dc_base + sine.
+    if (m_ac_enabled) m_V_dc_base = m_V_bias;
 }
 
 float DriftDiffusion::phiN(int i, int j) const noexcept {
@@ -677,6 +693,8 @@ double DriftDiffusion::nDensityAt(int i, int j,
     if (i < 0 || j < 0 || i >= m_W || j >= m_H) return 0.0;
     if (V_T <= 0.0) return 0.0;
     const auto k = idx(i, j);
+    if (m_dens_seeded) return static_cast<double>(m_n_dens[k]);
+    // Fallback (pre-seed): Boltzmann from phi.
     const double x = std::clamp(
         (static_cast<double>(m_psi[k]) - static_cast<double>(m_phi_n[k])) / V_T,
         -40.0, 40.0);
@@ -688,6 +706,7 @@ double DriftDiffusion::pDensityAt(int i, int j,
     if (i < 0 || j < 0 || i >= m_W || j >= m_H) return 0.0;
     if (V_T <= 0.0) return 0.0;
     const auto k = idx(i, j);
+    if (m_dens_seeded) return static_cast<double>(m_p_dens[k]);
     const double x = std::clamp(
         (static_cast<double>(m_phi_p[k]) - static_cast<double>(m_psi[k])) / V_T,
         -40.0, 40.0);
@@ -750,6 +769,17 @@ void DriftDiffusion::applyContactBoundaries(double n_i, double V_T) noexcept
 
     // Apply Dirichlet values everywhere a contact tag is set. Anode is
     // at +V_a (forward = positive); cathode is grounded.
+    //
+    //   psi_bc   = V_metal +/- V_T ln(N_majority / n_i)   (Sze 2.7)
+    //   n_bc     = N_d  (n-contact)  or  n_i^2 / N_a  (p-contact)
+    //   p_bc     = n_i^2 / N_d (n-cont) or N_a (p-cont)
+    //   phi_n_bc = phi_p_bc = V_metal     (no quasi-Fermi splitting at
+    //                                       a metal interface)
+    //
+    // Phase 4: density Dirichlet is essential for the SG continuity
+    // solver -- without it, n/p at the contacts decay to zero by
+    // numerical dissipation and the device disconnects.
+    const double n_i_sq = n_i * n_i;
     for (int j = 0; j < m_H; ++j) {
         for (int i = 0; i < m_W; ++i) {
             const std::size_t k = idx(i, j);
@@ -758,66 +788,130 @@ void DriftDiffusion::applyContactBoundaries(double n_i, double V_T) noexcept
             const double V_metal = (m_contact[k] == 1u)
                 ? static_cast<double>(m_V_bias) : 0.0;
 
-            const double Nd = std::max(double{m_Nd[k]}, 0.0);
-            const double Na = std::max(double{m_Na[k]}, 0.0);
+            const double Nd = std::max(double{m_Nd[k]}, 1.0);
+            const double Na = std::max(double{m_Na[k]}, 1.0);
 
-            const double psi_bc = (m_contact[k] == 1u)
-                ? V_metal - V_T * std::log(std::max(Na, 1.0) / n_i)   // p-anode
-                : V_metal + V_T * std::log(std::max(Nd, 1.0) / n_i);  // n-cathode
+            const bool   isAnode = (m_contact[k] == 1u);
+            const double psi_bc = isAnode
+                ? V_metal - V_T * std::log(Na / n_i)                  // p-anode
+                : V_metal + V_T * std::log(Nd / n_i);                 // n-cathode
 
-            m_psi  [k] = static_cast<float>(psi_bc);
-            m_phi_n[k] = static_cast<float>(V_metal);
-            m_phi_p[k] = static_cast<float>(V_metal);
+            const double n_bc = isAnode ? n_i_sq / Na : Nd;
+            const double p_bc = isAnode ? Na          : n_i_sq / Nd;
+
+            m_psi   [k] = static_cast<float>(psi_bc);
+            m_phi_n [k] = static_cast<float>(V_metal);
+            m_phi_p [k] = static_cast<float>(V_metal);
+            m_n_dens[k] = static_cast<float>(n_bc);
+            m_p_dens[k] = static_cast<float>(p_bc);
         }
     }
 }
 
 
 // =============================================================================
-// Continuity equation in quasi-Fermi formulation
-// -----------------------------------------------------------------------------
-// Steady-state electron continuity:
-//
-//     div(mu_n n grad phi_n) = R - G
-//
-// Discretised with arithmetic-mean face densities on a uniform mesh h:
-//
-//   sum_{k in {E,W,N,S}} c_k (phi_k - phi_C) = (h^2 / mu_n) * (R_C - G_C)
-//
-//   c_k = (n_C + n_k) / 2,   n_x = n_i exp((psi_x - phi_n_x) / V_T)
-//
-// Solve for phi_C:
-//
-//   phi_C^new = [ sum c_k phi_k - (h^2 / mu_n)(R_C - G_C) ] / sum c_k
-//
-// Stability: c_k > 0 always (densities), so the operator is positive
-// definite and SOR with omega ~ 1 converges. We also clamp the divisor
-// to >= 1 cm^-3 in case a contact pulls n -> 0 (rare reverse-bias spike).
-// Reference: Selberherr Sec. 6.1; Pierret Sec. 6.2.
+// Density seeding & quasi-Fermi refresh (Phase 4)
 // =============================================================================
+void DriftDiffusion::seedDensitiesFromBoltzmann(
+    double n_i, double V_T) noexcept
+{
+    if (n_i <= 0.0 || V_T <= 0.0) return;
+    for (std::size_t k = 0; k < m_n_dens.size(); ++k) {
+        const double xn = std::clamp(
+            (static_cast<double>(m_psi[k]) - static_cast<double>(m_phi_n[k]))
+            / V_T, -40.0, 40.0);
+        const double xp = std::clamp(
+            (static_cast<double>(m_phi_p[k]) - static_cast<double>(m_psi[k]))
+            / V_T, -40.0, 40.0);
+        m_n_dens[k] = static_cast<float>(n_i * std::exp(xn));
+        m_p_dens[k] = static_cast<float>(n_i * std::exp(xp));
+    }
+    m_dens_seeded = true;
+}
+
+void DriftDiffusion::refreshQuasiFermiFromDensities(
+    double n_i, double V_T) noexcept
+{
+    if (n_i <= 0.0 || V_T <= 0.0) return;
+    constexpr float density_floor = 1.0e-30f;
+    for (std::size_t k = 0; k < m_phi_n.size(); ++k) {
+        const float n_C = std::max(m_n_dens[k], density_floor);
+        const float p_C = std::max(m_p_dens[k], density_floor);
+        m_phi_n[k] = static_cast<float>(
+            static_cast<double>(m_psi[k])
+            - V_T * std::log(static_cast<double>(n_C) / n_i));
+        m_phi_p[k] = static_cast<float>(
+            static_cast<double>(m_psi[k])
+            + V_T * std::log(static_cast<double>(p_C) / n_i));
+    }
+}
+
+
+// =============================================================================
+// Scharfetter-Gummel continuity solvers              [Phase 4]
+// -----------------------------------------------------------------------------
+// SG flux between nodes (i,j) and (i+1,j) on uniform pitch h:
+//
+//   J_n(i+1/2) = (q V_T / h) mu_face [B(x) n_{i+1} - B(-x) n_i]
+//   J_p(i+1/2) = -(q V_T / h) mu_face [B(-x) p_{i+1} - B(x) p_i]
+//   x = (psi_{i+1} - psi_i) / V_T
+//
+// 5-point divergence + steady-state continuity gives the Gauss-Seidel
+// update for n_C:
+//
+//   n_C^new = [alpha n_old_C + sum_k mu_k off_k n_k - h^2 (R - G) / V_T]
+//           / [alpha + sum_k mu_k diag_k]
+//
+//   off_E   = B(x_E)        diag_E  = B(-x_E)            (electrons)
+//   off_W   = B(-x_W)       diag_W  = B(x_W)
+//   alpha   = h^2 / (V_T dt)   (zero -> steady-state limit)
+//
+// For holes, B(x) and B(-x) trade places (opposite drift sign).
+//
+// mu_face is evaluated *per face* via PhysicsEngine::localMobility*
+// using the locally-averaged total ionised doping and the local field
+// magnitude. This delivers velocity saturation inside depletion regions
+// without any extra bookkeeping.
+//
+// The transient term (alpha != 0) is the Backward Euler form of
+// (n_new - n_old)/dt = div(J_n)/q + (G - R), which is unconditionally
+// stable -- dt may be picked freely from picoseconds to microseconds.
+//
+// Reference: Scharfetter-Gummel IEEE-ED 16 (1969) 64; Selberherr 6.2.
+// =============================================================================
+namespace {
+
+// Local-mobility face evaluator. Pre-cached lambda factory keeps the
+// hot-path branch-free; mat is captured by reference.
+struct FaceMu {
+    const material::Profile& mat;
+    double T_lattice;
+    double mu_bulk_n;
+    double mu_bulk_p;
+
+    // average face doping (cm^-3)
+    [[nodiscard]] static double faceN(double Nd_a, double Nd_b,
+                                      double Na_a, double Na_b) noexcept {
+        return 0.5 * (Nd_a + Nd_b + Na_a + Na_b);
+    }
+};
+
+} // namespace
+
 void DriftDiffusion::solveContinuityElectron(
     double n_i, double V_T,
-    double mu_n,
+    double mu_n_bulk,
     const material::Profile& mat,
+    double T_lattice,
     int sweeps, double omega) noexcept
 {
-    if (n_i <= 0.0 || V_T <= 0.0 || mu_n <= 0.0) return;
-    const double h    = static_cast<double>(m_cell_pitch_cm);
-    const double h2   = h * h;
-    const double inv_mu = 1.0 / mu_n;
+    if (n_i <= 0.0 || V_T <= 0.0 || mu_n_bulk <= 0.0) return;
+    if (!m_dens_seeded) seedDensitiesFromBoltzmann(n_i, V_T);
 
-    auto nLocal = [&](std::size_t k) -> double {
-        const double x = std::clamp(
-            (static_cast<double>(m_psi[k])
-             - static_cast<double>(m_phi_n[k])) / V_T, -40.0, 40.0);
-        return n_i * std::exp(x);
-    };
-    auto pLocal = [&](std::size_t k) -> double {
-        const double x = std::clamp(
-            (static_cast<double>(m_phi_p[k])
-             - static_cast<double>(m_psi[k])) / V_T, -40.0, 40.0);
-        return n_i * std::exp(x);
-    };
+    const double h     = static_cast<double>(m_cell_pitch_cm);
+    const double h2    = h * h;
+    const double alpha = (m_transient_enabled && m_dt > 0.0)
+                       ? h2 / (V_T * m_dt) : 0.0;
 
     for (int it = 0; it < sweeps; ++it) {
         for (int j = 0; j < m_H; ++j) {
@@ -834,36 +928,95 @@ void DriftDiffusion::solveContinuityElectron(
                 const std::size_t kN = idx(i, jp);
                 const std::size_t kS = idx(i, jm);
 
-                const double n_C = nLocal(k);
-                const double p_C = pLocal(k);
+                const double psi_C = m_psi[k];
+                const double xE = (m_psi[kE] - psi_C) / V_T;
+                const double xW = (psi_C - m_psi[kW]) / V_T;
+                const double xN = (m_psi[kN] - psi_C) / V_T;
+                const double xS = (psi_C - m_psi[kS]) / V_T;
 
-                // Face densities (arithmetic mean).
-                const double cE = std::max(0.5 * (n_C + nLocal(kE)), 1.0);
-                const double cW = std::max(0.5 * (n_C + nLocal(kW)), 1.0);
-                const double cN = std::max(0.5 * (n_C + nLocal(kN)), 1.0);
-                const double cS = std::max(0.5 * (n_C + nLocal(kS)), 1.0);
-                const double cT = cE + cW + cN + cS;
+                // Per-face mobility (Matthiessen + Caughey-Thomas).
+                // |E|_face from one-sided difference; field in V/cm.
+                const double E_face_E = std::abs(m_psi[kE] - psi_C) / h;
+                const double E_face_W = std::abs(psi_C - m_psi[kW]) / h;
+                const double E_face_N = std::abs(m_psi[kN] - psi_C) / h;
+                const double E_face_S = std::abs(psi_C - m_psi[kS]) / h;
+
+                const double Nf_E = 0.5 * (m_Nd[k] + m_Nd[kE]
+                                          + m_Na[k] + m_Na[kE]);
+                const double Nf_W = 0.5 * (m_Nd[k] + m_Nd[kW]
+                                          + m_Na[k] + m_Na[kW]);
+                const double Nf_N = 0.5 * (m_Nd[k] + m_Nd[kN]
+                                          + m_Na[k] + m_Na[kN]);
+                const double Nf_S = 0.5 * (m_Nd[k] + m_Nd[kS]
+                                          + m_Na[k] + m_Na[kS]);
+
+                const double mu_E = (Nf_E > 1.0e10)
+                    ? PhysicsEngine::localMobilityElectron(
+                          mat, T_lattice, Nf_E, E_face_E)
+                    : mu_n_bulk;
+                const double mu_W = (Nf_W > 1.0e10)
+                    ? PhysicsEngine::localMobilityElectron(
+                          mat, T_lattice, Nf_W, E_face_W)
+                    : mu_n_bulk;
+                const double mu_N = (Nf_N > 1.0e10)
+                    ? PhysicsEngine::localMobilityElectron(
+                          mat, T_lattice, Nf_N, E_face_N)
+                    : mu_n_bulk;
+                const double mu_S = (Nf_S > 1.0e10)
+                    ? PhysicsEngine::localMobilityElectron(
+                          mat, T_lattice, Nf_S, E_face_S)
+                    : mu_n_bulk;
+
+                // SG Bernoulli coefficients.
+                using PE = PhysicsEngine;
+                const double bE  = PE::bernoulli( xE);
+                const double bnE = PE::bernoulli(-xE);
+                const double bW  = PE::bernoulli( xW);
+                const double bnW = PE::bernoulli(-xW);
+                const double bN  = PE::bernoulli( xN);
+                const double bnN = PE::bernoulli(-xN);
+                const double bS  = PE::bernoulli( xS);
+                const double bnS = PE::bernoulli(-xS);
+
+                // Electrons: off uses B(x_E)/B(-x_W)/B(x_N)/B(-x_S);
+                //            diag uses B(-x_E)/B(x_W)/B(-x_N)/B(x_S).
+                const double off_E = mu_E * bE;
+                const double off_W = mu_W * bnW;
+                const double off_N = mu_N * bN;
+                const double off_S = mu_S * bnS;
+                const double diag  = mu_E * bnE + mu_W * bW
+                                   + mu_N * bnN + mu_S * bS;
 
                 // Source: R_SRH + R_Aug - G_BTBT  [cm^-3 / s]
-                const double R_srh = PhysicsEngine::recombSRH(
+                const double n_C = m_n_dens[k];
+                const double p_C = m_p_dens[k];
+                const double R_srh = PE::recombSRH(
                     n_C, p_C, n_i, mat.tau_n, mat.tau_p);
-                const double R_aug = PhysicsEngine::recombAuger(
+                const double R_aug = PE::recombAuger(
                     n_C, p_C, n_i, mat.C_n_aug, mat.C_p_aug);
-                const double Em = electricFieldMagAt(i, j);
-                const double G_btbt = PhysicsEngine::kaneBTBT(
+                const double Em    = electricFieldMagAt(i, j);
+                const double G_bt  = PE::kaneBTBT(
                     Em, mat.A_kane, mat.B_kane, mat.btbt_isDirect);
-                const double src = R_srh + R_aug - G_btbt;
+                const double RmG   = R_srh + R_aug - G_bt;
 
+                // n_C^new = [alpha n_old_C + sum off n_k - h^2 (R-G)/V_T]
+                //        / [alpha + sum diag]
                 const double rhs =
-                    cE * m_phi_n[kE] + cW * m_phi_n[kW]
-                  + cN * m_phi_n[kN] + cS * m_phi_n[kS]
-                  - h2 * inv_mu * src;
+                    alpha * static_cast<double>(m_n_dens_old[k])
+                  + off_E * m_n_dens[kE] + off_W * m_n_dens[kW]
+                  + off_N * m_n_dens[kN] + off_S * m_n_dens[kS]
+                  - h2 * RmG / V_T;
+                const double den = alpha + diag;
+                if (den <= 1.0e-30) continue;        // unreachable
 
-                const double phi_new = rhs / cT;
-                const double phi_C   = m_phi_n[k];
-                const double relaxed = phi_C + omega * (phi_new - phi_C);
+                const double n_new = rhs / den;
+                const double n_relaxed =
+                    static_cast<double>(m_n_dens[k])
+                  + omega * (n_new - static_cast<double>(m_n_dens[k]));
 
-                m_phi_n[k] = static_cast<float>(relaxed);
+                // Floor at 0 -- B-coefficient products can occasionally
+                // produce a negative excursion at the diffusion edge.
+                m_n_dens[k] = static_cast<float>(std::max(n_relaxed, 0.0));
             }
         }
     }
@@ -871,30 +1024,19 @@ void DriftDiffusion::solveContinuityElectron(
 
 void DriftDiffusion::solveContinuityHole(
     double n_i, double V_T,
-    double mu_p,
+    double mu_p_bulk,
     const material::Profile& mat,
+    double T_lattice,
     int sweeps, double omega) noexcept
 {
-    if (n_i <= 0.0 || V_T <= 0.0 || mu_p <= 0.0) return;
-    const double h    = static_cast<double>(m_cell_pitch_cm);
-    const double h2   = h * h;
-    const double inv_mu = 1.0 / mu_p;
+    if (n_i <= 0.0 || V_T <= 0.0 || mu_p_bulk <= 0.0) return;
+    if (!m_dens_seeded) seedDensitiesFromBoltzmann(n_i, V_T);
 
-    auto nLocal = [&](std::size_t k) -> double {
-        const double x = std::clamp(
-            (static_cast<double>(m_psi[k])
-             - static_cast<double>(m_phi_n[k])) / V_T, -40.0, 40.0);
-        return n_i * std::exp(x);
-    };
-    auto pLocal = [&](std::size_t k) -> double {
-        const double x = std::clamp(
-            (static_cast<double>(m_phi_p[k])
-             - static_cast<double>(m_psi[k])) / V_T, -40.0, 40.0);
-        return n_i * std::exp(x);
-    };
+    const double h     = static_cast<double>(m_cell_pitch_cm);
+    const double h2    = h * h;
+    const double alpha = (m_transient_enabled && m_dt > 0.0)
+                       ? h2 / (V_T * m_dt) : 0.0;
 
-    // Note: for holes,  J_p = -q mu_p p grad phi_p, so the continuity
-    // operator div(mu_p p grad phi_p) = -(R - G).  RHS sign flipped.
     for (int it = 0; it < sweeps; ++it) {
         for (int j = 0; j < m_H; ++j) {
             for (int i = 0; i < m_W; ++i) {
@@ -910,34 +1052,89 @@ void DriftDiffusion::solveContinuityHole(
                 const std::size_t kN = idx(i, jp);
                 const std::size_t kS = idx(i, jm);
 
-                const double n_C = nLocal(k);
-                const double p_C = pLocal(k);
+                const double psi_C = m_psi[k];
+                const double xE = (m_psi[kE] - psi_C) / V_T;
+                const double xW = (psi_C - m_psi[kW]) / V_T;
+                const double xN = (m_psi[kN] - psi_C) / V_T;
+                const double xS = (psi_C - m_psi[kS]) / V_T;
 
-                const double cE = std::max(0.5 * (p_C + pLocal(kE)), 1.0);
-                const double cW = std::max(0.5 * (p_C + pLocal(kW)), 1.0);
-                const double cN = std::max(0.5 * (p_C + pLocal(kN)), 1.0);
-                const double cS = std::max(0.5 * (p_C + pLocal(kS)), 1.0);
-                const double cT = cE + cW + cN + cS;
+                const double E_face_E = std::abs(m_psi[kE] - psi_C) / h;
+                const double E_face_W = std::abs(psi_C - m_psi[kW]) / h;
+                const double E_face_N = std::abs(m_psi[kN] - psi_C) / h;
+                const double E_face_S = std::abs(psi_C - m_psi[kS]) / h;
 
-                const double R_srh = PhysicsEngine::recombSRH(
+                const double Nf_E = 0.5 * (m_Nd[k] + m_Nd[kE]
+                                          + m_Na[k] + m_Na[kE]);
+                const double Nf_W = 0.5 * (m_Nd[k] + m_Nd[kW]
+                                          + m_Na[k] + m_Na[kW]);
+                const double Nf_N = 0.5 * (m_Nd[k] + m_Nd[kN]
+                                          + m_Na[k] + m_Na[kN]);
+                const double Nf_S = 0.5 * (m_Nd[k] + m_Nd[kS]
+                                          + m_Na[k] + m_Na[kS]);
+
+                const double mu_E = (Nf_E > 1.0e10)
+                    ? PhysicsEngine::localMobilityHole(
+                          mat, T_lattice, Nf_E, E_face_E)
+                    : mu_p_bulk;
+                const double mu_W = (Nf_W > 1.0e10)
+                    ? PhysicsEngine::localMobilityHole(
+                          mat, T_lattice, Nf_W, E_face_W)
+                    : mu_p_bulk;
+                const double mu_N = (Nf_N > 1.0e10)
+                    ? PhysicsEngine::localMobilityHole(
+                          mat, T_lattice, Nf_N, E_face_N)
+                    : mu_p_bulk;
+                const double mu_S = (Nf_S > 1.0e10)
+                    ? PhysicsEngine::localMobilityHole(
+                          mat, T_lattice, Nf_S, E_face_S)
+                    : mu_p_bulk;
+
+                using PE = PhysicsEngine;
+                const double bE  = PE::bernoulli( xE);
+                const double bnE = PE::bernoulli(-xE);
+                const double bW  = PE::bernoulli( xW);
+                const double bnW = PE::bernoulli(-xW);
+                const double bN  = PE::bernoulli( xN);
+                const double bnN = PE::bernoulli(-xN);
+                const double bS  = PE::bernoulli( xS);
+                const double bnS = PE::bernoulli(-xS);
+
+                // Holes: B(x) and B(-x) trade roles (opposite drift sign).
+                const double off_E = mu_E * bnE;
+                const double off_W = mu_W * bW;
+                const double off_N = mu_N * bnN;
+                const double off_S = mu_S * bS;
+                const double diag  = mu_E * bE + mu_W * bnW
+                                   + mu_N * bN + mu_S * bnS;
+
+                const double n_C = m_n_dens[k];
+                const double p_C = m_p_dens[k];
+                const double R_srh = PE::recombSRH(
                     n_C, p_C, n_i, mat.tau_n, mat.tau_p);
-                const double R_aug = PhysicsEngine::recombAuger(
+                const double R_aug = PE::recombAuger(
                     n_C, p_C, n_i, mat.C_n_aug, mat.C_p_aug);
-                const double Em = electricFieldMagAt(i, j);
-                const double G_btbt = PhysicsEngine::kaneBTBT(
+                const double Em    = electricFieldMagAt(i, j);
+                const double G_bt  = PE::kaneBTBT(
                     Em, mat.A_kane, mat.B_kane, mat.btbt_isDirect);
-                const double src = R_srh + R_aug - G_btbt;
+                const double RmG   = R_srh + R_aug - G_bt;
 
+                // p continuity: dp/dt = -div(J_p)/q + (G - R)
+                // The SG sign on the source is the same as electrons
+                // because the operator we derived already captures the
+                // sign flip (B trade). Keep -h^2 (R-G)/V_T identical.
                 const double rhs =
-                    cE * m_phi_p[kE] + cW * m_phi_p[kW]
-                  + cN * m_phi_p[kN] + cS * m_phi_p[kS]
-                  + h2 * inv_mu * src;     // sign opposite of electrons
+                    alpha * static_cast<double>(m_p_dens_old[k])
+                  + off_E * m_p_dens[kE] + off_W * m_p_dens[kW]
+                  + off_N * m_p_dens[kN] + off_S * m_p_dens[kS]
+                  - h2 * RmG / V_T;
+                const double den = alpha + diag;
+                if (den <= 1.0e-30) continue;
 
-                const double phi_new = rhs / cT;
-                const double phi_C   = m_phi_p[k];
-                const double relaxed = phi_C + omega * (phi_new - phi_C);
-
-                m_phi_p[k] = static_cast<float>(relaxed);
+                const double p_new = rhs / den;
+                const double p_relaxed =
+                    static_cast<double>(m_p_dens[k])
+                  + omega * (p_new - static_cast<double>(m_p_dens[k]));
+                m_p_dens[k] = static_cast<float>(std::max(p_relaxed, 0.0));
             }
         }
     }
@@ -958,8 +1155,9 @@ void DriftDiffusion::solveContinuityHole(
 // =============================================================================
 double DriftDiffusion::solveGummel(
     double n_i, double V_T, double epsilon_r,
-    double mu_n, double mu_p,
+    double mu_n_bulk, double mu_p_bulk,
     const material::Profile& mat,
+    double T_lattice,
     int    outer_iters,
     int    poisson_inner,
     int    continuity_inner,
@@ -968,16 +1166,29 @@ double DriftDiffusion::solveGummel(
 {
     if (outer_iters <= 0) return 0.0;
 
+    // Bootstrap densities on first call (or after clearDoping).
+    if (!m_dens_seeded) {
+        applyContactBoundaries(n_i, V_T);
+        seedDensitiesFromBoltzmann(n_i, V_T);
+    }
+
     double residual = 0.0;
     for (int outer = 0; outer < outer_iters; ++outer) {
         applyContactBoundaries(n_i, V_T);
         residual = solvePoissonInner(n_i, V_T, epsilon_r,
                                      poisson_inner, omega_psi);
-        applyContactBoundaries(n_i, V_T);    // refresh after psi sweep
-        solveContinuityElectron(n_i, V_T, mu_n, mat,
+        applyContactBoundaries(n_i, V_T);    // refresh ψ after sweep
+
+        solveContinuityElectron(n_i, V_T, mu_n_bulk, mat, T_lattice,
                                 continuity_inner, omega_phi);
-        solveContinuityHole    (n_i, V_T, mu_p, mat,
+        solveContinuityHole    (n_i, V_T, mu_p_bulk, mat, T_lattice,
                                 continuity_inner, omega_phi);
+
+        // Sync visualisation / Poisson view: phi_n,p must reflect the
+        // SG-iterated densities so the next Poisson sweep sees the same
+        // n,p values. Poisson reads phi -> exp -> n; with this sync the
+        // Boltzmann formula and the SG densities agree at this iterate.
+        refreshQuasiFermiFromDensities(n_i, V_T);
     }
     return residual;
 }
@@ -1018,28 +1229,162 @@ double DriftDiffusion::terminalCurrentDensity(
     if (n_i <= 0.0 || V_T <= 0.0 || m_W < 3 || m_H < 1) return 0.0;
     constexpr double q = 1.602176634e-19;
     const double h    = static_cast<double>(m_cell_pitch_cm);
-    const double inv2h = 1.0 / (2.0 * h);
 
+    // Accumulate the SG flux directly on a mid-column face -- this is
+    // the quantity the SG continuity iterates already conserve, so the
+    // result is consistent with the iterated state. (Previous central-
+    // difference of phi worked but mismatched the conservation form.)
     const int i_mid = m_W / 2;
+    if (i_mid < 1 || i_mid >= m_W) return 0.0;
+
     double J_sum = 0.0;
     for (int j = 0; j < m_H; ++j) {
-        const auto kC = idx(i_mid,     j);
-        const auto kE = idx(i_mid + 1, j);
-        const auto kW = idx(i_mid - 1, j);
+        const auto kL = idx(i_mid,     j);
+        const auto kR = idx(i_mid + 1, j);
 
-        const double xn = std::clamp(
-            (m_psi[kC] - m_phi_n[kC]) / V_T, -40.0, 40.0);
-        const double xp = std::clamp(
-            (m_phi_p[kC] - m_psi[kC]) / V_T, -40.0, 40.0);
-        const double n_C = n_i * std::exp(xn);
-        const double p_C = n_i * std::exp(xp);
+        const double x = (m_psi[kR] - m_psi[kL]) / V_T;
+        const double bp = PhysicsEngine::bernoulli( x);
+        const double bn = PhysicsEngine::bernoulli(-x);
 
-        const double dphi_n_dx = (m_phi_n[kE] - m_phi_n[kW]) * inv2h;
-        const double dphi_p_dx = (m_phi_p[kE] - m_phi_p[kW]) * inv2h;
+        const double J_n = (q * mu_n * V_T / h)
+            * (bp * m_n_dens[kR] - bn * m_n_dens[kL]);
+        const double J_p = -(q * mu_p * V_T / h)
+            * (bn * m_p_dens[kR] - bp * m_p_dens[kL]);
 
-        const double J_n = -q * mu_n * n_C * dphi_n_dx;
-        const double J_p = -q * mu_p * p_C * dphi_p_dx;
         J_sum += J_n + J_p;
     }
     return J_sum / static_cast<double>(m_H);
+}
+
+
+// =============================================================================
+// Transient (Backward Euler) and AC probe              [Phase 4]
+// =============================================================================
+void DriftDiffusion::setTimeStep(double dt_s) noexcept {
+    // Clamp to a reasonable range so the BE transient term doesn't get
+    // pathological. Picoseconds at the low end (tunnel-current scales);
+    // milliseconds at the high end (long thermal-diffusion-style runs).
+    m_dt = std::clamp(dt_s, 1.0e-15, 1.0e-3);
+}
+
+void DriftDiffusion::setACProbe(bool enabled,
+                                double freq_Hz, double amp_V) noexcept
+{
+    m_ac_enabled = enabled;
+    m_ac_freq    = std::clamp(freq_Hz, 1.0, 1.0e12);
+    m_ac_amp     = std::clamp(amp_V,   0.0, 1.0);
+    if (enabled) m_V_dc_base = m_V_bias;
+}
+
+double DriftDiffusion::stepTransient(
+    double n_i, double V_T, double epsilon_r,
+    const material::Profile& mat,
+    double T_lattice,
+    int    outer_iters,
+    int    poisson_inner,
+    int    continuity_inner,
+    double omega_psi,
+    double omega_phi) noexcept
+{
+    if (!m_transient_enabled || m_dt <= 0.0) return 0.0;
+
+    // Seed densities first if needed; otherwise copying zero -> n_old
+    // would feed a zero into the BE diagonal and crush the first step.
+    if (!m_dens_seeded) {
+        applyContactBoundaries(n_i, V_T);
+        seedDensitiesFromBoltzmann(n_i, V_T);
+    }
+
+    // 1) Save the current state into the "old" buffers for the BE term.
+    std::copy(m_n_dens.begin(), m_n_dens.end(), m_n_dens_old.begin());
+    std::copy(m_p_dens.begin(), m_p_dens.end(), m_p_dens_old.begin());
+
+    // 2) Advance simulation time and apply the AC probe to V_a.
+    m_sim_time += m_dt;
+    if (m_ac_enabled) {
+        constexpr double TWO_PI = 6.283185307179586;
+        const double sineV = m_ac_amp
+            * std::sin(TWO_PI * m_ac_freq * m_sim_time);
+        m_V_bias = static_cast<float>(m_V_dc_base + sineV);
+    }
+
+    // 3) Bulk mobilities for the Matthiessen fallback at intrinsic faces.
+    using PE = PhysicsEngine;
+    const double mu_n_bulk = PE::matthiessenMobilityElectron(mat, T_lattice, 0.0);
+    const double mu_p_bulk = PE::matthiessenMobilityHole    (mat, T_lattice, 0.0);
+
+    // 4) Run one Gummel iteration with the BE transient term active.
+    return solveGummel(n_i, V_T, epsilon_r,
+                       mu_n_bulk, mu_p_bulk, mat, T_lattice,
+                       outer_iters, poisson_inner, continuity_inner,
+                       omega_psi, omega_phi);
+}
+
+
+// =============================================================================
+// Small-signal conductance via DC perturbation          [Phase 4 bonus]
+// -----------------------------------------------------------------------------
+// Symmetric 2-point finite difference around the current bias:
+//
+//     G ~ ( J(V_a + dV) - J(V_a - dV) ) / (2 dV)        [S/cm^2]
+//
+// Cheap and robust. For C, the engine offers PhysicsEngine::depletion-
+// CapacitanceFlat / diffusionCapacitance using the painted Nd, Na and
+// the current forward I -- those run from the UI directly because they
+// don't need a perturbation sweep.
+// =============================================================================
+double DriftDiffusion::smallSignalConductance(
+    double n_i, double V_T, double epsilon_r,
+    const material::Profile& mat,
+    double T_lattice,
+    double dV) noexcept
+{
+    if (dV <= 0.0) return 0.0;
+    using PE = PhysicsEngine;
+    const double mu_n = PE::matthiessenMobilityElectron(mat, T_lattice, 0.0);
+    const double mu_p = PE::matthiessenMobilityHole    (mat, T_lattice, 0.0);
+
+    // Save current state -- the perturbation runs trash the densities,
+    // so we restore everything at the end.
+    const float V_save = m_V_bias;
+    static thread_local std::vector<float> save_n, save_p, save_psi,
+                                            save_phi_n, save_phi_p;
+    save_n    .resize(m_n_dens.size());   std::copy(m_n_dens.begin(),  m_n_dens.end(),  save_n.begin());
+    save_p    .resize(m_p_dens.size());   std::copy(m_p_dens.begin(),  m_p_dens.end(),  save_p.begin());
+    save_psi  .resize(m_psi.size());      std::copy(m_psi.begin(),     m_psi.end(),     save_psi.begin());
+    save_phi_n.resize(m_phi_n.size());    std::copy(m_phi_n.begin(),   m_phi_n.end(),   save_phi_n.begin());
+    save_phi_p.resize(m_phi_p.size());    std::copy(m_phi_p.begin(),   m_phi_p.end(),   save_phi_p.begin());
+
+    constexpr int OUTER  = 12;
+    constexpr int POISS  = 30;
+    constexpr int CONT   = 18;
+
+    // J at V + dV
+    setAppliedBias(V_save + static_cast<float>(dV));
+    solveGummel(n_i, V_T, epsilon_r, mu_n, mu_p, mat, T_lattice,
+                OUTER, POISS, CONT, 0.85, 1.0);
+    const double J_plus  = terminalCurrentDensity(n_i, V_T, mu_n, mu_p);
+
+    // restore mid-point
+    std::copy(save_n.begin(),     save_n.end(),     m_n_dens.begin());
+    std::copy(save_p.begin(),     save_p.end(),     m_p_dens.begin());
+    std::copy(save_psi.begin(),   save_psi.end(),   m_psi.begin());
+    std::copy(save_phi_n.begin(), save_phi_n.end(), m_phi_n.begin());
+    std::copy(save_phi_p.begin(), save_phi_p.end(), m_phi_p.begin());
+
+    // J at V - dV
+    setAppliedBias(V_save - static_cast<float>(dV));
+    solveGummel(n_i, V_T, epsilon_r, mu_n, mu_p, mat, T_lattice,
+                OUTER, POISS, CONT, 0.85, 1.0);
+    const double J_minus = terminalCurrentDensity(n_i, V_T, mu_n, mu_p);
+
+    // Restore.
+    std::copy(save_n.begin(),     save_n.end(),     m_n_dens.begin());
+    std::copy(save_p.begin(),     save_p.end(),     m_p_dens.begin());
+    std::copy(save_psi.begin(),   save_psi.end(),   m_psi.begin());
+    std::copy(save_phi_n.begin(), save_phi_n.end(), m_phi_n.begin());
+    std::copy(save_phi_p.begin(), save_phi_p.end(), m_phi_p.begin());
+    setAppliedBias(V_save);
+
+    return (J_plus - J_minus) / (2.0 * dV);
 }

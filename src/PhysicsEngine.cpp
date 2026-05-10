@@ -677,6 +677,93 @@ double PhysicsEngine::nonEqHoleDensity(
     return n_i * std::exp(x);
 }
 
+// =============================================================================
+// Bernoulli function (Scharfetter-Gummel core)
+// -----------------------------------------------------------------------------
+// Branch-clamped to keep B(x) finite over the full IEEE-754 range. For
+// |x| < 1e-6 the 4-term Taylor is used (relative error < 1e-25); for
+// |x| > 40 the asymptotic forms are used; in between, std::expm1 is
+// preferred over (exp(x) - 1) because it preserves accuracy near zero
+// even when called from optimised inlines.
+// Reference: Selberherr Sec. 6.2 / Scharfetter-Gummel IEEE-ED 16 (1969).
+// =============================================================================
+double PhysicsEngine::bernoulli(double x) noexcept {
+    constexpr double SMALL = 1.0e-6;
+    constexpr double BIG   = 40.0;
+    if (std::abs(x) < SMALL) return bernoulli_taylor(x);
+    if (x >  BIG)            return x * std::exp(-x);  // exp(x)-1 ~ exp(x)
+    if (x < -BIG)            return -x;                // exp(x) ~ 0, denom = -1
+    return x / std::expm1(x);
+}
+
+
+// =============================================================================
+// Spatially varying mobility (Phase 4)
+// -----------------------------------------------------------------------------
+// Matthiessen lattice + impurity scattering at local doping, then
+// Caughey-Thomas saturation at the local field. Both pieces already
+// exist in PhysicsEngine; this is just the canonical composition.
+// =============================================================================
+double PhysicsEngine::localMobilityElectron(
+    const material::Profile& mat, double T,
+    double N_total_per_cm3, double E_field_V_per_cm) noexcept
+{
+    const double mu_low = matthiessenMobilityElectron(mat, T, N_total_per_cm3);
+    return highFieldMobility(mu_low, E_field_V_per_cm,
+                             mat.v_sat_n, mat.beta_n);
+}
+
+double PhysicsEngine::localMobilityHole(
+    const material::Profile& mat, double T,
+    double N_total_per_cm3, double E_field_V_per_cm) noexcept
+{
+    const double mu_low = matthiessenMobilityHole(mat, T, N_total_per_cm3);
+    return highFieldMobility(mu_low, E_field_V_per_cm,
+                             mat.v_sat_p, mat.beta_p);
+}
+
+
+// =============================================================================
+// Capacitance helpers (Phase 4 bonus -- small-signal C, G estimators)
+// -----------------------------------------------------------------------------
+// One-sided / abrupt PN junction depletion width (Sze Eq. 2.19):
+//
+//   W = sqrt[ 2 eps_s (V_bi - V_a) (Na + Nd) / (q Na Nd) ]
+//
+// Reverse bias (V_a < 0) widens W; forward bias (V_a > 0, but
+// V_a < V_bi) shrinks W. We cap V_a at 0.95 V_bi to avoid the formula
+// blowing up when forward bias overcomes the built-in potential
+// (where the depletion approximation itself stops being valid).
+// =============================================================================
+double PhysicsEngine::depletionWidthFlat(
+    double Nd, double Na, double V_bi, double V_a,
+    double epsilon_r) noexcept
+{
+    if (Nd <= 0.0 || Na <= 0.0 || epsilon_r <= 0.0 || V_bi <= 0.0) return 0.0;
+    const double V_eff = std::max(V_bi - V_a, 0.05 * V_bi);
+    const double eps_s = phys::eps_0 * epsilon_r;
+    const double Nratio = (Na + Nd) / (Na * Nd);
+    return std::sqrt(2.0 * eps_s * V_eff * Nratio / phys::q_e);
+}
+
+double PhysicsEngine::depletionCapacitanceFlat(
+    double Nd, double Na, double V_bi, double V_a,
+    double epsilon_r, double area_cm2) noexcept
+{
+    const double W = depletionWidthFlat(Nd, Na, V_bi, V_a, epsilon_r);
+    if (W <= 0.0) return 0.0;
+    return phys::eps_0 * epsilon_r * area_cm2 / W;
+}
+
+double PhysicsEngine::diffusionCapacitance(
+    double I_forward_A, double tau_s, double V_T) noexcept
+{
+    if (V_T <= 0.0 || I_forward_A <= 0.0 || tau_s <= 0.0) return 0.0;
+    // C_d = q I tau / (kT) = I tau / V_T
+    return I_forward_A * tau_s / V_T;
+}
+
+
 double PhysicsEngine::ohmicContactPsi(
     double V_metal, double Nd, double Na,
     double n_i, double V_T) noexcept

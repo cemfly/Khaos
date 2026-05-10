@@ -275,6 +275,70 @@ public:
         double n_i, double V_T) noexcept;
 
     // -------------------------------------------------------------------
+    // Bernoulli function -- the heart of the Scharfetter-Gummel scheme.
+    //
+    //   B(x) = x / (exp(x) - 1)
+    //
+    // Branch-clamped for IEEE-754 safety:
+    //   |x| < 1e-6  -> Taylor:   1 - x/2 + x^2/12
+    //   x  >  +40   -> overflow: x * exp(-x)  (denominator ~ exp(x))
+    //   x  <  -40   -> underflow: -x          (denominator ~ -1)
+    //   else        -> std::expm1(x) -- accurate near zero.
+    //
+    // Scharfetter-Gummel face flux for electrons:
+    //   J_{i+1/2} = (q mu V_T / h) [ B(x) n_{i+1} - B(-x) n_i ]
+    //   x = (psi_{i+1} - psi_i) / V_T
+    //
+    // Reference: Scharfetter & Gummel, IEEE TED-16 (1969) 64;
+    //            Selberherr Sec. 6.2.
+    // -------------------------------------------------------------------
+    [[nodiscard]] static constexpr double bernoulli_taylor(double x) noexcept {
+        // Used for |x| < 1e-6.  4-term Taylor; absolute error < 1e-25.
+        return 1.0 - 0.5 * x + (x * x) / 12.0
+             - (x * x * x * x) / 720.0;
+    }
+
+    [[nodiscard]] static double bernoulli(double x) noexcept;
+
+    // -------------------------------------------------------------------
+    // Spatially varying mobility    [Phase 4]
+    //
+    //   mu(N, E) = highField( matthiessen(T, N), |E|, v_sat, beta )
+    //
+    // Matthiessen accounts for lattice + ionised-impurity scattering at
+    // the local doping; Caughey-Thomas (Sze 1.5.4) caps the velocity at
+    // v_sat under high field. Used in the SG continuity solver to
+    // resolve velocity saturation in depletion regions.
+    // -------------------------------------------------------------------
+    [[nodiscard]] static double localMobilityElectron(
+        const material::Profile& mat, double T,
+        double N_total_per_cm3, double E_field_V_per_cm) noexcept;
+    [[nodiscard]] static double localMobilityHole(
+        const material::Profile& mat, double T,
+        double N_total_per_cm3, double E_field_V_per_cm) noexcept;
+
+    // -------------------------------------------------------------------
+    // Small-signal capacitance helpers       [Phase 4 bonus]
+    //
+    //   Junction (depletion) capacitance:
+    //     C_j = eps_s * A / W_dep
+    //     W_dep = sqrt(2 eps_s (V_bi - V_a) (Na+Nd) / (q Na Nd))   (Sze 2.19)
+    //
+    //   Diffusion (storage) capacitance (long-base diode, forward bias):
+    //     C_d = q I_F tau_p / (kT)                                  (Sze 2.59)
+    //
+    //   Total small-signal C = C_j + C_d.
+    // -------------------------------------------------------------------
+    [[nodiscard]] static double depletionWidthFlat(
+        double Nd, double Na, double V_bi, double V_a,
+        double epsilon_r) noexcept;
+    [[nodiscard]] static double depletionCapacitanceFlat(
+        double Nd, double Na, double V_bi, double V_a,
+        double epsilon_r, double area_cm2) noexcept;
+    [[nodiscard]] static double diffusionCapacitance(
+        double I_forward_A, double tau_s, double V_T) noexcept;
+
+    // -------------------------------------------------------------------
     // Auger recombination       (three-particle, Sze Sec. 1.5.6)
     //
     //   R_Aug = (C_n n + C_p p) (n p - n_i^2)        [cm^-3 / s]

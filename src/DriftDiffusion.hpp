@@ -207,10 +207,14 @@ public:
     //
     // Reference: Gummel, IEEE TED-11 (1964) 455; Selberherr Ch. 6;
     // Sze Sec. 2.3.
+    //
+    // T_lattice [K] is required to evaluate the Matthiessen mobility at
+    // each face (lattice + impurity scattering depend on T).
     [[nodiscard]] double solveGummel(
         double n_i, double V_T, double epsilon_r,
-        double mu_n, double mu_p,
+        double mu_n_bulk, double mu_p_bulk,
         const material::Profile& mat,
+        double T_lattice         = 300.0,
         int    outer_iters       = 6,
         int    poisson_inner     = 30,
         int    continuity_inner  = 20,
@@ -235,6 +239,61 @@ public:
     [[nodiscard]] const std::vector<float>& phiPField()   const noexcept { return m_phi_p; }
     [[nodiscard]] const std::vector<float>& donorField()  const noexcept { return m_Nd; }
     [[nodiscard]] const std::vector<float>& acceptorField()const noexcept{ return m_Na; }
+    [[nodiscard]] const std::vector<float>& nDensField()  const noexcept { return m_n_dens; }
+    [[nodiscard]] const std::vector<float>& pDensField()  const noexcept { return m_p_dens; }
+
+    // ---- Phase 4 -- Transient (Backward Euler) -------------------------
+    //
+    // Time-stepping API. dt > 0 enables the transient term in continuity:
+    //
+    //   (n_new - n_old) / dt - div(J_n)/q = G - R
+    //
+    // Backward Euler is unconditionally stable -- no CFL constraint on dt.
+    // Pass 0 (or call setTransientEnabled(false)) to fall back to pure
+    // steady-state Gummel.
+    void  setTimeStep(double dt_s) noexcept;
+    [[nodiscard]] double timeStep() const noexcept { return m_dt; }
+    void  setTransientEnabled(bool e) noexcept { m_transient_enabled = e; }
+    [[nodiscard]] bool transientEnabled() const noexcept { return m_transient_enabled; }
+    [[nodiscard]] double simulationTime() const noexcept { return m_sim_time; }
+    void  resetSimulationTime() noexcept { m_sim_time = 0.0; }
+
+    // Advances the simulation by m_dt: copies n,p -> n_old,p_old, applies
+    // any AC probe to V_a, then runs one Gummel iteration. Returns the
+    // L2 psi residual (same convention as solveGummel).
+    [[nodiscard]] double stepTransient(
+        double n_i, double V_T, double epsilon_r,
+        const material::Profile& mat,
+        double T_lattice,
+        int    outer_iters       = 4,
+        int    poisson_inner     = 20,
+        int    continuity_inner  = 12,
+        double omega_psi         = 0.85,
+        double omega_phi         = 1.00) noexcept;
+
+    // ---- Phase 4 -- AC probe (small-signal stimulus) -------------------
+    //
+    //   V_a(t) = V_DC + amp * sin(2 pi f t)
+    //
+    // The DC base is the value passed to setAppliedBias before AC is
+    // turned on; the AC envelope rides on top. Useful with stepTransient
+    // to visualise capacitive charging on Live Oscilloscope.
+    void  setACProbe(bool enabled, double freq_Hz, double amp_V) noexcept;
+    [[nodiscard]] bool   acEnabled() const noexcept { return m_ac_enabled; }
+    [[nodiscard]] double acFreq()    const noexcept { return m_ac_freq; }
+    [[nodiscard]] double acAmp()     const noexcept { return m_ac_amp; }
+
+    // ---- Phase 4 -- Small-signal estimators (DC perturbation) ----------
+    //
+    //  G_DC = dJ/dV  : run two extra Gummel solves at V +/- dV, finite-
+    //                  difference the terminal current.  Returns S/cm^2.
+    //  C_dep / C_diff : reported via PhysicsEngine helpers using a
+    //                  detected depletion width and tau.
+    [[nodiscard]] double smallSignalConductance(
+        double n_i, double V_T, double epsilon_r,
+        const material::Profile& mat,
+        double T_lattice,
+        double dV = 0.005) noexcept;
 
     // Approximate collector-emitter current (sweep-out rate). Useful for
     // reporting transistor "operating point" in the readouts panel.
@@ -280,17 +339,30 @@ private:
                                            int sweeps,
                                            double omega) noexcept;
 
-    // Solve for phi_n by relaxing  div(mu_n n grad phi_n) = R - G
-    // where R, G fold in SRH + Auger - Kane BTBT. Arithmetic-mean face
-    // density for the coefficient -- not Scharfetter-Gummel, but stable
-    // for the real-time UI on 1 um grids.
+    // Scharfetter-Gummel continuity solvers [Phase 4]
+    //
+    //   J_n(i+1/2) = (q V_T / h) mu_face [B(x) n_{i+1} - B(-x) n_i]
+    //   J_p(i+1/2) = -(q V_T / h) mu_face [B(-x) p_{i+1} - B(x) p_i]
+    //   x = (psi_{i+1} - psi_i) / V_T
+    //
+    // Per-face mu evaluated from local doping (Matthiessen) and field
+    // (Caughey-Thomas).  Backward-Euler time term added when m_dt > 0
+    // and m_transient_enabled.  Stable up to >50 V reverse bias.
+    //
+    // mu_n_bulk / mu_p_bulk are the engine's bulk fallbacks (used at
+    // boundaries where doping is intrinsic and Matthiessen would return
+    // very high values).
+    //
+    // Reference: Selberherr Sec. 6.2 / Scharfetter-Gummel IEEE-ED 16 (1969).
     void solveContinuityElectron(double n_i, double V_T,
-                                 double mu_n,
+                                 double mu_n_bulk,
                                  const material::Profile& mat,
+                                 double T_lattice,
                                  int sweeps, double omega) noexcept;
     void solveContinuityHole    (double n_i, double V_T,
-                                 double mu_p,
+                                 double mu_p_bulk,
                                  const material::Profile& mat,
+                                 double T_lattice,
                                  int sweeps, double omega) noexcept;
 
     // Apply Dirichlet BCs at the outer columns (anode / cathode), set
@@ -344,6 +416,34 @@ private:
     // can tag arbitrary user-painted layouts (not just the outer columns).
     std::vector<std::uint8_t> m_contact;
     bool                      m_contacts_dirty = true;
+
+    // ---- Phase 4 -- Density buffers (SG continuity primary unknowns) ---
+    std::vector<float> m_n_dens;      // electron density [cm^-3]
+    std::vector<float> m_p_dens;      // hole     density [cm^-3]
+    std::vector<float> m_n_dens_old;  // previous time step (BE transient)
+    std::vector<float> m_p_dens_old;
+    bool               m_dens_seeded   = false;   // initial Boltzmann seed?
+
+    // ---- Phase 4 -- Transient state ------------------------------------
+    double m_dt                = 0.0;     // time step [s]; 0 = steady-state
+    double m_sim_time          = 0.0;     // accumulated time [s]
+    bool   m_transient_enabled = false;
+
+    // ---- Phase 4 -- AC small-signal probe ------------------------------
+    bool   m_ac_enabled = false;
+    double m_ac_freq    = 1.0e6;          // [Hz]
+    double m_ac_amp     = 0.005;          // [V]
+    float  m_V_dc_base  = 0.0f;           // DC operating point used by AC
+
+    // Internal: refresh m_phi_n / m_phi_p from m_n_dens / m_p_dens / m_psi.
+    // Called once per Gummel iteration so the BandView quasi-Fermi cuts
+    // stay consistent with the SG-iterated densities.
+    void refreshQuasiFermiFromDensities(double n_i, double V_T) noexcept;
+
+    // Internal: bootstrap n,p from local Boltzmann limit using current
+    // psi / phi buffers. Cheap O(N); first solveGummel call seeds, later
+    // calls reuse the converged state.
+    void seedDensitiesFromBoltzmann(double n_i, double V_T) noexcept;
 
     // ---- Material-tunable integrator constants --------------------------
     float m_D_n        = 0.04f;   // carrier diffusion strength per unit dt
