@@ -857,6 +857,29 @@ double PhysicsEngine::avalancheMultiplication(
 
 
 // =============================================================================
+// Anderson rule -- valence-band edge (Phase 5 helper)
+// -----------------------------------------------------------------------------
+//   E_v(x) = E_c(x) - E_g(x)
+// where E_c(x) is the static helper above (in absolute eV with the engine's
+// reference material as the chi anchor). E_g is evaluated at the requested
+// temperature so hot cells display narrowed gaps in BandView. The chi anchor
+// is the reference profile, so the *relative* step at A/B interfaces equals
+//   Delta E_v(B - A) = (chi_A - chi_B) + (E_g,A - E_g,B)
+// = -(Delta E_c) - (Delta E_g of A->B) -- matching andersonOffsets().
+// =============================================================================
+double PhysicsEngine::valenceBandEdge(
+    double psi_volts,
+    const material::Profile& mat_local,
+    const material::Profile& mat_ref,
+    double T) noexcept
+{
+    const double Ec = conductionBandEdge(psi_volts, mat_local, mat_ref);
+    const double Eg = bandgapAt(mat_local, T);
+    return Ec - Eg;
+}
+
+
+// =============================================================================
 // Band-to-band (Zener) tunneling -- Kane model
 // -----------------------------------------------------------------------------
 //

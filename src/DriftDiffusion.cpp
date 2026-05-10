@@ -37,6 +37,15 @@ DriftDiffusion::DriftDiffusion(int gridW, int gridH)
     , m_p_dens     (static_cast<std::size_t>(gridW * gridH), 0.0f)
     , m_n_dens_old (static_cast<std::size_t>(gridW * gridH), 0.0f)
     , m_p_dens_old (static_cast<std::size_t>(gridW * gridH), 0.0f)
+    // Phase 5: per-cell material id (defaults to "reference" = id 0xFF)
+    , m_mat         (static_cast<std::size_t>(gridW * gridH), 0xFFu)
+    , m_ni_local    (static_cast<std::size_t>(gridW * gridH), 1.0e10f)  // Si@300K placeholder
+    , m_eps_r_local (static_cast<std::size_t>(gridW * gridH), 11.7f)
+    , m_delta_n     (static_cast<std::size_t>(gridW * gridH), 0.0f)
+    , m_delta_p     (static_cast<std::size_t>(gridW * gridH), 0.0f)
+    // Phase 5: Wachutka thermal extras
+    , m_T_old      (static_cast<std::size_t>(gridW * gridH), 300.0f)
+    , m_H_gen      (static_cast<std::size_t>(gridW * gridH), 0.0f)
 {}
 
 
@@ -64,6 +73,18 @@ void DriftDiffusion::configureForMaterial(const material::Profile& mat) {
     m_alpha_T = static_cast<float>(0.018 * (alpha_phys / alpha_si));
 
     m_tau = 1.6f;  // visualisation lifetime
+
+    // Phase 5: Identify which material::Kind this profile corresponds
+    // to so painted reference cells (id 0xFF) resolve to the right
+    // ChiSet during the heterojunction Poisson / Wachutka stages.
+    if      (&mat == &material::byKind(material::Kind::Silicon))
+        m_ref_mat = material::Kind::Silicon;
+    else if (&mat == &material::byKind(material::Kind::GaAs))
+        m_ref_mat = material::Kind::GaAs;
+    else if (&mat == &material::byKind(material::Kind::Germanium))
+        m_ref_mat = material::Kind::Germanium;
+    // else: leave the previous reference -- caller wired a custom Profile,
+    // and changing it would silently break the heterojunction map.
 }
 
 
@@ -94,6 +115,8 @@ void DriftDiffusion::clear() {
     std::fill(m_G.begin(),      m_G.end(),      0.0f);
     std::fill(m_T.begin(),      m_T.end(),      m_T_ambient);
     std::fill(m_T_next.begin(), m_T_next.end(), m_T_ambient);
+    std::fill(m_T_old.begin(),  m_T_old.end(),  m_T_ambient);
+    std::fill(m_H_gen.begin(),  m_H_gen.end(),  0.0f);
 }
 
 
@@ -472,6 +495,144 @@ void DriftDiffusion::setCellPitchCm(float h) noexcept {
 
 
 // =============================================================================
+// Heterojunction painter [Phase 5]
+// -----------------------------------------------------------------------------
+// Per-cell material id storage:
+//
+//   0xFF = "use the engine's reference material" (default everywhere)
+//   0   = Silicon
+//   1   = GaAs
+//   2   = Germanium
+//
+// Storing 0xFF for unpainted cells lets us repaint the canvas after the
+// engine swaps materials without touching every cell -- the resolveAt()
+// helper looks up the reference profile only when the id is 0xFF.
+// =============================================================================
+void DriftDiffusion::setReferenceMaterial(material::Kind k) noexcept {
+    m_ref_mat = k;
+    // Painted cells keep their explicit id; only unpainted (0xFF) cells
+    // follow the new reference -- which is what the user expects when
+    // they swap the global Material dropdown after painting an HBT.
+}
+
+void DriftDiffusion::paintMaterialBrush(float u, float v,
+                                        material::Kind k,
+                                        int radius_cells) noexcept
+{
+    u = std::clamp(u, 0.0f, 1.0f);
+    v = std::clamp(v, 0.0f, 1.0f);
+    const int ic = static_cast<int>(u * (m_W - 1));
+    const int jc = static_cast<int>(v * (m_H - 1));
+    const int r2 = radius_cells * radius_cells;
+
+    const int i0 = std::max(0,        ic - radius_cells);
+    const int i1 = std::min(m_W - 1,  ic + radius_cells);
+    const int j0 = std::max(0,        jc - radius_cells);
+    const int j1 = std::min(m_H - 1,  jc + radius_cells);
+
+    const auto id = static_cast<std::uint8_t>(k);
+    for (int j = j0; j <= j1; ++j) {
+        for (int i = i0; i <= i1; ++i) {
+            const int di = i - ic;
+            const int dj = j - jc;
+            if (di * di + dj * dj > r2) continue;
+            m_mat[idx(i, j)] = id;
+        }
+    }
+    m_contacts_dirty = true;   // contact n_i depends on local material
+}
+
+void DriftDiffusion::clearMaterials() noexcept {
+    std::fill(m_mat.begin(), m_mat.end(), 0xFFu);
+    m_contacts_dirty = true;
+}
+
+material::Kind DriftDiffusion::materialAt(int i, int j) const noexcept {
+    if (i < 0 || j < 0 || i >= m_W || j >= m_H) return m_ref_mat;
+    const auto id = m_mat[idx(i, j)];
+    if (id == 0xFFu) return m_ref_mat;
+    if (id < static_cast<std::uint8_t>(material::kCount))
+        return static_cast<material::Kind>(id);
+    return m_ref_mat;
+}
+
+const material::Profile& DriftDiffusion::profileAt(int i, int j) const noexcept {
+    return material::byKind(materialAt(i, j));
+}
+
+double DriftDiffusion::localBandgapAt(int i, int j) const noexcept {
+    const auto& mat = profileAt(i, j);
+    const float T   = temperatureFieldAt(i, j);
+    return PhysicsEngine::bandgapAt(mat, static_cast<double>(T));
+}
+
+double DriftDiffusion::localIntrinsicAt(int i, int j) const noexcept {
+    const auto& mat = profileAt(i, j);
+    const float T   = temperatureFieldAt(i, j);
+    return PhysicsEngine::intrinsicCarrierAt(mat, static_cast<double>(T));
+}
+
+double DriftDiffusion::localElectronAffinityAt(int i, int j) const noexcept {
+    return profileAt(i, j).chi;
+}
+
+float DriftDiffusion::temperatureFieldAt(int i, int j) const noexcept {
+    if (i < 0 || j < 0 || i >= m_W || j >= m_H) return m_T_ambient;
+    return m_T[idx(i, j)];
+}
+
+
+// =============================================================================
+// Heterojunction parameter cache refresh
+// -----------------------------------------------------------------------------
+// Pulls per-cell material parameters once, so the Poisson and continuity
+// inner sweeps only ever touch float buffers (no virtual lookups, no
+// std::pow / std::log10 in the hot path).
+//
+// Cost: O(W*H) per call; called at the start of every public solver entry
+// point (solvePoisson, solveGummel, stepTransient, solveHeatEquation).
+// =============================================================================
+void DriftDiffusion::refreshLocalParamCache(double V_T) noexcept {
+    (void)V_T;  // currently unused; kept for API stability vs future BGN
+
+    const auto& mat_ref = material::byKind(m_ref_mat);
+    const double chi_ref = mat_ref.chi;
+    // Reference Eg evaluated at the device's *ambient* temperature. We do
+    // not let Eg_ref drift with local hotspots -- the Anderson chi-shift
+    // is a metallurgical property of the interface, not a hot-spot effect.
+    const double Eg_ref  = PhysicsEngine::bandgapAt(
+        mat_ref, static_cast<double>(m_T_ambient));
+
+    for (int j = 0; j < m_H; ++j) {
+        for (int i = 0; i < m_W; ++i) {
+            const std::size_t k = idx(i, j);
+            const auto& mat = profileAt(i, j);
+            const double T  = static_cast<double>(m_T[k]);
+
+            // Local n_i with hot-spot feedback: lattice T enters via both
+            // bandgap narrowing (Varshni) and the T^(3/2) DOS scaling.
+            // This is what closes the thermal-runaway loop.
+            m_ni_local[k]    = static_cast<float>(
+                PhysicsEngine::intrinsicCarrierAt(mat, T));
+
+            // Local epsilon_r for the Poisson harmonic-mean stencil.
+            m_eps_r_local[k] = static_cast<float>(mat.epsilon_r);
+
+            // Anderson chi-shifts.  Eg used for delta_p uses ambient T
+            // (same reasoning as Eg_ref above) so the sole T dependence
+            // sits in n_i and the continuity-side mobility evaluator.
+            const double Eg_C  = PhysicsEngine::bandgapAt(
+                mat, static_cast<double>(m_T_ambient));
+            const double dn = mat.chi - chi_ref;
+            const double dp = (mat.chi - chi_ref) + (Eg_C - Eg_ref);
+            m_delta_n[k] = static_cast<float>(dn);
+            m_delta_p[k] = static_cast<float>(dp);
+        }
+    }
+}
+
+
+// =============================================================================
 // Self-consistent Poisson (equilibrium, Boltzmann statistics) [Phase 1]
 // -----------------------------------------------------------------------------
 // 5-point Laplacian on uniform pitch h:
@@ -493,23 +654,54 @@ double DriftDiffusion::solvePoisson(double n_i_cm3,
 {
     // Public Phase-1 entry point. Reads m_phi_n / m_phi_p (0 in pure
     // equilibrium -> identical to the original Boltzmann formulation).
-    // Refresh contact BCs first so stale Gummel state can't leak in
-    // (Phase 4 added contact tagging that solvePoissonInner now obeys).
+    // Refresh the heterojunction cache & contact BCs first so stale
+    // state can't leak in.
+    refreshLocalParamCache(V_T);
     applyContactBoundaries(n_i_cm3, V_T);
     return solvePoissonInner(n_i_cm3, V_T, epsilon_r, iterations, omega);
 }
 
+// =============================================================================
+// Heterojunction-aware Poisson inner sweep                       [Phase 5]
+// -----------------------------------------------------------------------------
+// Finite-volume 5-point stencil with variable epsilon (harmonic mean):
+//
+//   eps_e (psi_E - psi_C) + eps_w (psi_W - psi_C)
+// + eps_n (psi_N - psi_C) + eps_s (psi_S - psi_C)
+//   = -h^2 q (p - n + N_d - N_a)
+//
+// solving for psi_C (Gauss-Seidel under-relaxation):
+//
+//   psi_C^new = [ eps_e psi_E + eps_w psi_W + eps_n psi_N + eps_s psi_S
+//               + (q h^2 / eps_0) rho ] / (eps_e + eps_w + eps_n + eps_s)
+//
+// where the *relative* permittivities sit inside the harmonic mean and
+// q*h^2/eps_0 carries the absolute scaling (volts).  In a homogeneous
+// reference material, eps_e = eps_w = eps_n = eps_s = eps_r and the
+// formula collapses to the Phase-1 expression with rho_coef = q h^2 / eps_s.
+//
+// The carrier densities use the Anderson chi-shifts m_delta_n / m_delta_p:
+//
+//   n(x) = n_i_ref * exp((psi + delta_n - phi_n) / V_T)
+//   p(x) = n_i_ref * exp((phi_p - psi - delta_p) / V_T)
+//
+// so that np = n_i_ref^2 exp((delta_n - delta_p)/V_T) = n_i(x)^2 in
+// equilibrium (mass action holds locally even though the prefactor is
+// uniform).  See refreshLocalParamCache() for the definitions of
+// delta_n / delta_p; in the homogeneous limit both are identically zero.
+// References: Selberherr Sec. 5; Pierret App. B; Anderson 1962.
+// =============================================================================
 double DriftDiffusion::solvePoissonInner(double n_i_cm3,
                                          double V_T,
                                          double epsilon_r,
                                          int    sweeps,
                                          double omega) noexcept
 {
+    (void)epsilon_r;  // now per-cell; argument retained for API stability
     constexpr double eps_0_local = 8.854187817e-14;     // F/cm
-    const double eps_s    = eps_0_local * epsilon_r;
-    constexpr double q    = 1.602176634e-19;
-    const double h        = static_cast<double>(m_cell_pitch_cm);
-    const double rho_coef = q * h * h / eps_s;          // [V * cm^3]
+    constexpr double q           = 1.602176634e-19;
+    const double h               = static_cast<double>(m_cell_pitch_cm);
+    const double rho_coef_pre    = q * h * h / eps_0_local;   // [V * cm^3]
 
     if (V_T <= 0.0) return 0.0;
 
@@ -521,27 +713,42 @@ double DriftDiffusion::solvePoissonInner(double n_i_cm3,
         for (int j = 0; j < m_H; ++j) {
             for (int i = 0; i < m_W; ++i) {
                 const std::size_t k = idx(i, j);
-
-                // Skip cells fixed by Dirichlet contacts.
                 if (m_contact[k] != 0u) continue;
 
                 const int ip = std::min(i + 1, m_W - 1);
                 const int im = std::max(i - 1, 0);
                 const int jp = std::min(j + 1, m_H - 1);
                 const int jm = std::max(j - 1, 0);
+                const std::size_t kE = idx(ip, j);
+                const std::size_t kW = idx(im, j);
+                const std::size_t kN = idx(i, jp);
+                const std::size_t kS = idx(i, jm);
 
-                const double psi_C = m_psi[k];
-                const double psi_E = m_psi[idx(ip, j)];
-                const double psi_W = m_psi[idx(im, j)];
-                const double psi_N = m_psi[idx(i, jp)];
-                const double psi_S = m_psi[idx(i, jm)];
+                // Per-cell relative permittivities and harmonic-mean
+                // face values (Phase 5: heterojunction support).
+                const double er_C = m_eps_r_local[k];
+                const double er_E = m_eps_r_local[kE];
+                const double er_W = m_eps_r_local[kW];
+                const double er_N = m_eps_r_local[kN];
+                const double er_S = m_eps_r_local[kS];
 
-                // Quasi-Fermi-aware densities (Phase 3). In equilibrium
-                // m_phi_n = m_phi_p = 0 -> reduces to the Boltzmann form.
+                const double ef_E = 2.0 * er_C * er_E / (er_C + er_E);
+                const double ef_W = 2.0 * er_C * er_W / (er_C + er_W);
+                const double ef_N = 2.0 * er_C * er_N / (er_C + er_N);
+                const double ef_S = 2.0 * er_C * er_S / (er_C + er_S);
+
+                // Anderson chi-shifted Boltzmann densities at the cell.
+                // (n_i_cm3 used here as the reference n_i; see header.)
+                const double dn   = m_delta_n[k];
+                const double dp   = m_delta_p[k];
+                const double psi_C  = m_psi[k];
                 const double phin_C = m_phi_n[k];
                 const double phip_C = m_phi_p[k];
-                const double xn = std::clamp((psi_C - phin_C) / V_T, -40.0, 40.0);
-                const double xp = std::clamp((phip_C - psi_C) / V_T, -40.0, 40.0);
+
+                const double xn = std::clamp(
+                    (psi_C + dn - phin_C) / V_T, -40.0, 40.0);
+                const double xp = std::clamp(
+                    (phip_C - psi_C - dp) / V_T, -40.0, 40.0);
                 const double n_C = n_i_cm3 * std::exp(xn);
                 const double p_C = n_i_cm3 * std::exp(xp);
 
@@ -550,9 +757,16 @@ double DriftDiffusion::solvePoissonInner(double n_i_cm3,
                     + static_cast<double>(m_Nd[k])
                     - static_cast<double>(m_Na[k]);
 
-                const double psi_new = 0.25 * (
-                    psi_E + psi_W + psi_N + psi_S + rho_coef * rho
-                );
+                const double psi_E = m_psi[kE];
+                const double psi_W = m_psi[kW];
+                const double psi_N = m_psi[kN];
+                const double psi_S = m_psi[kS];
+
+                const double eps_sum = ef_E + ef_W + ef_N + ef_S;
+                const double psi_new = (
+                      ef_E * psi_E + ef_W * psi_W
+                    + ef_N * psi_N + ef_S * psi_S
+                    + rho_coef_pre * rho) / eps_sum;
 
                 const double psi_relaxed = psi_C + omega * (psi_new - psi_C);
                 const double dpsi        = psi_relaxed - psi_C;
@@ -634,11 +848,33 @@ bool DriftDiffusion::sampleHorizontalCut(
         || out_Ec.size() < static_cast<std::size_t>(m_W)
         || out_Ev.size() < static_cast<std::size_t>(m_W)) return false;
 
+    // Phase 5: heterojunction-aware band edges.
+    //
+    //   E_c(x) = Ec0 - psi(x) - (chi(x) - chi_ref)
+    //   E_v(x) = E_c(x) - E_g(x, T_local)
+    //
+    // The (chi - chi_ref) term is the Anderson conduction-band offset;
+    // the local E_g(T) introduces both the gap-narrowing hot-spot effect
+    // and the heterojunction valence-band step (since dEv = dEg - dEc).
+    // In the homogeneous-reference limit chi == chi_ref and E_g == Ec0,
+    // and the formula collapses to the Phase-2 expression bit-for-bit.
+    (void)Ev0;
+    const auto& mat_ref = material::byKind(m_ref_mat);
+    const double chi_ref = mat_ref.chi;
+
     for (int i = 0; i < m_W; ++i) {
-        const float psi = m_psi[idx(i, j_row)];
+        const auto kij = idx(i, j_row);
+        const float psi = m_psi[kij];
         out_psi[i] = psi;
-        out_Ec [i] = static_cast<float>(Ec0) - psi;   // eV
-        out_Ev [i] = static_cast<float>(Ev0) - psi;
+
+        const auto& mat = profileAt(i, j_row);
+        const double T_C  = static_cast<double>(m_T[kij]);
+        const double Eg_C = PhysicsEngine::bandgapAt(mat, T_C);
+        const double dn   = mat.chi - chi_ref;          // chi shift [eV]
+
+        const float Ec = static_cast<float>(Ec0 - psi - dn);
+        out_Ec[i] = Ec;
+        out_Ev[i] = static_cast<float>(Ec - Eg_C);
     }
     return true;
 }
@@ -910,6 +1146,8 @@ void DriftDiffusion::solveContinuityElectron(
 
     const double h     = static_cast<double>(m_cell_pitch_cm);
     const double h2    = h * h;
+    // m_dt may have been updated since the previous call (transient
+    // sweeps). Read once per sweep set.
     const double alpha = (m_transient_enabled && m_dt > 0.0)
                        ? h2 / (V_T * m_dt) : 0.0;
 
@@ -928,18 +1166,28 @@ void DriftDiffusion::solveContinuityElectron(
                 const std::size_t kN = idx(i, jp);
                 const std::size_t kS = idx(i, jm);
 
-                const double psi_C = m_psi[k];
-                const double xE = (m_psi[kE] - psi_C) / V_T;
-                const double xW = (psi_C - m_psi[kW]) / V_T;
-                const double xN = (m_psi[kN] - psi_C) / V_T;
-                const double xS = (psi_C - m_psi[kS]) / V_T;
+                // Phase 5: SG argument uses the *electron drift potential*
+                // eta_n = psi + delta_n where delta_n = (chi - chi_ref)/q.
+                // In the homogeneous-reference limit delta_n = 0 and we
+                // recover the Phase-4 formulation bit-for-bit.
+                const double dn_C = m_delta_n[k];
+                const double psi_eta_C = m_psi[k]  + dn_C;
+                const double psi_eta_E = m_psi[kE] + m_delta_n[kE];
+                const double psi_eta_W = m_psi[kW] + m_delta_n[kW];
+                const double psi_eta_N = m_psi[kN] + m_delta_n[kN];
+                const double psi_eta_S = m_psi[kS] + m_delta_n[kS];
 
-                // Per-face mobility (Matthiessen + Caughey-Thomas).
-                // |E|_face from one-sided difference; field in V/cm.
-                const double E_face_E = std::abs(m_psi[kE] - psi_C) / h;
-                const double E_face_W = std::abs(psi_C - m_psi[kW]) / h;
-                const double E_face_N = std::abs(m_psi[kN] - psi_C) / h;
-                const double E_face_S = std::abs(psi_C - m_psi[kS]) / h;
+                const double xE = (psi_eta_E - psi_eta_C) / V_T;
+                const double xW = (psi_eta_C - psi_eta_W) / V_T;
+                const double xN = (psi_eta_N - psi_eta_C) / V_T;
+                const double xS = (psi_eta_C - psi_eta_S) / V_T;
+
+                // Per-face mobility (Matthiessen + Caughey-Thomas) using
+                // the *local* material profile at each face.
+                const double E_face_E = std::abs(psi_eta_E - psi_eta_C) / h;
+                const double E_face_W = std::abs(psi_eta_C - psi_eta_W) / h;
+                const double E_face_N = std::abs(psi_eta_N - psi_eta_C) / h;
+                const double E_face_S = std::abs(psi_eta_C - psi_eta_S) / h;
 
                 const double Nf_E = 0.5 * (m_Nd[k] + m_Nd[kE]
                                           + m_Na[k] + m_Na[kE]);
@@ -950,21 +1198,30 @@ void DriftDiffusion::solveContinuityElectron(
                 const double Nf_S = 0.5 * (m_Nd[k] + m_Nd[kS]
                                           + m_Na[k] + m_Na[kS]);
 
+                // Local lattice T per cell (Wachutka feedback) and per-
+                // cell material for mobility evaluation.
+                const auto& mat_C  = profileAt(i,  j);
+                const double T_C   = static_cast<double>(m_T[k]);
+                const auto& mat_E_ = profileAt(ip, j);
+                const auto& mat_W_ = profileAt(im, j);
+                const auto& mat_N_ = profileAt(i,  jp);
+                const auto& mat_S_ = profileAt(i,  jm);
+
                 const double mu_E = (Nf_E > 1.0e10)
                     ? PhysicsEngine::localMobilityElectron(
-                          mat, T_lattice, Nf_E, E_face_E)
+                          mat_E_, T_C, Nf_E, E_face_E)
                     : mu_n_bulk;
                 const double mu_W = (Nf_W > 1.0e10)
                     ? PhysicsEngine::localMobilityElectron(
-                          mat, T_lattice, Nf_W, E_face_W)
+                          mat_W_, T_C, Nf_W, E_face_W)
                     : mu_n_bulk;
                 const double mu_N = (Nf_N > 1.0e10)
                     ? PhysicsEngine::localMobilityElectron(
-                          mat, T_lattice, Nf_N, E_face_N)
+                          mat_N_, T_C, Nf_N, E_face_N)
                     : mu_n_bulk;
                 const double mu_S = (Nf_S > 1.0e10)
                     ? PhysicsEngine::localMobilityElectron(
-                          mat, T_lattice, Nf_S, E_face_S)
+                          mat_S_, T_C, Nf_S, E_face_S)
                     : mu_n_bulk;
 
                 // SG Bernoulli coefficients.
@@ -987,17 +1244,20 @@ void DriftDiffusion::solveContinuityElectron(
                 const double diag  = mu_E * bnE + mu_W * bW
                                    + mu_N * bnN + mu_S * bS;
 
-                // Source: R_SRH + R_Aug - G_BTBT  [cm^-3 / s]
+                // Source: R_SRH + R_Aug - G_BTBT  [cm^-3 / s].
+                // Local n_i (depends on local Eg + local lattice T).
                 const double n_C = m_n_dens[k];
                 const double p_C = m_p_dens[k];
+                const double n_i_C = static_cast<double>(m_ni_local[k]);
                 const double R_srh = PE::recombSRH(
-                    n_C, p_C, n_i, mat.tau_n, mat.tau_p);
+                    n_C, p_C, n_i_C, mat_C.tau_n, mat_C.tau_p);
                 const double R_aug = PE::recombAuger(
-                    n_C, p_C, n_i, mat.C_n_aug, mat.C_p_aug);
+                    n_C, p_C, n_i_C, mat_C.C_n_aug, mat_C.C_p_aug);
                 const double Em    = electricFieldMagAt(i, j);
                 const double G_bt  = PE::kaneBTBT(
-                    Em, mat.A_kane, mat.B_kane, mat.btbt_isDirect);
+                    Em, mat_C.A_kane, mat_C.B_kane, mat_C.btbt_isDirect);
                 const double RmG   = R_srh + R_aug - G_bt;
+                (void)mat; (void)T_lattice;
 
                 // n_C^new = [alpha n_old_C + sum off n_k - h^2 (R-G)/V_T]
                 //        / [alpha + sum diag]
@@ -1052,16 +1312,25 @@ void DriftDiffusion::solveContinuityHole(
                 const std::size_t kN = idx(i, jp);
                 const std::size_t kS = idx(i, jm);
 
-                const double psi_C = m_psi[k];
-                const double xE = (m_psi[kE] - psi_C) / V_T;
-                const double xW = (psi_C - m_psi[kW]) / V_T;
-                const double xN = (m_psi[kN] - psi_C) / V_T;
-                const double xS = (psi_C - m_psi[kS]) / V_T;
+                // Phase 5: SG argument uses the *hole drift potential*
+                // eta_p = psi + delta_p where delta_p includes both the
+                // chi step and the Eg step (-> -E_v).  This is what
+                // makes a wide-gap emitter reject back-injected holes.
+                const double psi_eta_C = m_psi[k]  + m_delta_p[k];
+                const double psi_eta_E = m_psi[kE] + m_delta_p[kE];
+                const double psi_eta_W = m_psi[kW] + m_delta_p[kW];
+                const double psi_eta_N = m_psi[kN] + m_delta_p[kN];
+                const double psi_eta_S = m_psi[kS] + m_delta_p[kS];
 
-                const double E_face_E = std::abs(m_psi[kE] - psi_C) / h;
-                const double E_face_W = std::abs(psi_C - m_psi[kW]) / h;
-                const double E_face_N = std::abs(m_psi[kN] - psi_C) / h;
-                const double E_face_S = std::abs(psi_C - m_psi[kS]) / h;
+                const double xE = (psi_eta_E - psi_eta_C) / V_T;
+                const double xW = (psi_eta_C - psi_eta_W) / V_T;
+                const double xN = (psi_eta_N - psi_eta_C) / V_T;
+                const double xS = (psi_eta_C - psi_eta_S) / V_T;
+
+                const double E_face_E = std::abs(psi_eta_E - psi_eta_C) / h;
+                const double E_face_W = std::abs(psi_eta_C - psi_eta_W) / h;
+                const double E_face_N = std::abs(psi_eta_N - psi_eta_C) / h;
+                const double E_face_S = std::abs(psi_eta_C - psi_eta_S) / h;
 
                 const double Nf_E = 0.5 * (m_Nd[k] + m_Nd[kE]
                                           + m_Na[k] + m_Na[kE]);
@@ -1072,21 +1341,28 @@ void DriftDiffusion::solveContinuityHole(
                 const double Nf_S = 0.5 * (m_Nd[k] + m_Nd[kS]
                                           + m_Na[k] + m_Na[kS]);
 
+                const auto& mat_C  = profileAt(i,  j);
+                const double T_C   = static_cast<double>(m_T[k]);
+                const auto& mat_E_ = profileAt(ip, j);
+                const auto& mat_W_ = profileAt(im, j);
+                const auto& mat_N_ = profileAt(i,  jp);
+                const auto& mat_S_ = profileAt(i,  jm);
+
                 const double mu_E = (Nf_E > 1.0e10)
                     ? PhysicsEngine::localMobilityHole(
-                          mat, T_lattice, Nf_E, E_face_E)
+                          mat_E_, T_C, Nf_E, E_face_E)
                     : mu_p_bulk;
                 const double mu_W = (Nf_W > 1.0e10)
                     ? PhysicsEngine::localMobilityHole(
-                          mat, T_lattice, Nf_W, E_face_W)
+                          mat_W_, T_C, Nf_W, E_face_W)
                     : mu_p_bulk;
                 const double mu_N = (Nf_N > 1.0e10)
                     ? PhysicsEngine::localMobilityHole(
-                          mat, T_lattice, Nf_N, E_face_N)
+                          mat_N_, T_C, Nf_N, E_face_N)
                     : mu_p_bulk;
                 const double mu_S = (Nf_S > 1.0e10)
                     ? PhysicsEngine::localMobilityHole(
-                          mat, T_lattice, Nf_S, E_face_S)
+                          mat_S_, T_C, Nf_S, E_face_S)
                     : mu_p_bulk;
 
                 using PE = PhysicsEngine;
@@ -1109,14 +1385,16 @@ void DriftDiffusion::solveContinuityHole(
 
                 const double n_C = m_n_dens[k];
                 const double p_C = m_p_dens[k];
+                const double n_i_C = static_cast<double>(m_ni_local[k]);
                 const double R_srh = PE::recombSRH(
-                    n_C, p_C, n_i, mat.tau_n, mat.tau_p);
+                    n_C, p_C, n_i_C, mat_C.tau_n, mat_C.tau_p);
                 const double R_aug = PE::recombAuger(
-                    n_C, p_C, n_i, mat.C_n_aug, mat.C_p_aug);
+                    n_C, p_C, n_i_C, mat_C.C_n_aug, mat_C.C_p_aug);
                 const double Em    = electricFieldMagAt(i, j);
                 const double G_bt  = PE::kaneBTBT(
-                    Em, mat.A_kane, mat.B_kane, mat.btbt_isDirect);
+                    Em, mat_C.A_kane, mat_C.B_kane, mat_C.btbt_isDirect);
                 const double RmG   = R_srh + R_aug - G_bt;
+                (void)mat; (void)T_lattice;
 
                 // p continuity: dp/dt = -div(J_p)/q + (G - R)
                 // The SG sign on the source is the same as electrons
@@ -1165,6 +1443,10 @@ double DriftDiffusion::solveGummel(
     double omega_phi) noexcept
 {
     if (outer_iters <= 0) return 0.0;
+
+    // Phase 5: refresh per-cell n_i / chi-shift / eps_r cache once per
+    // Gummel call.  Inner solvers read from these float buffers.
+    refreshLocalParamCache(V_T);
 
     // Bootstrap densities on first call (or after clearDoping).
     if (!m_dens_seeded) {
@@ -1318,6 +1600,199 @@ double DriftDiffusion::stepTransient(
                        mu_n_bulk, mu_p_bulk, mat, T_lattice,
                        outer_iters, poisson_inner, continuity_inner,
                        omega_psi, omega_phi);
+}
+
+
+// =============================================================================
+// Wachutka local heat equation (FTCS, sub-stepped)            [Phase 5]
+// -----------------------------------------------------------------------------
+// Solves the lattice-temperature equation
+//
+//     rho Cp dT/dt = div(kappa grad T) + H(x,y)
+//
+// on the painter grid.  Heat source H(x,y) decomposes into:
+//
+//   H_J = sigma(x) * |E(x)|^2                     [Joule]
+//       = q (n mu_n + p mu_p) |E|^2
+//   H_R = (R_SRH + R_Aug - G_BTBT) * (E_g + 3 k_B T) * q   [Recombination]
+//
+// Discretization: cell-centred finite volume with harmonic-mean face
+// thermal conductivities so the heterogeneous-medium flux is rigorous
+// (kappa varies across material brushes):
+//
+//   bar_kappa_{i+1/2} = 2 kappa_C kappa_{C+1} / (kappa_C + kappa_{C+1})
+//
+// Time stepping: forward Euler (FTCS) with the Fourier-number CFL bound
+//
+//   alpha_eff = max_x (kappa_face_sum / rho_cp(x))
+//   dt_sub <= 0.24 * h^2 / alpha_eff
+//
+// Sub-stepping covers the full requested wall-clock interval; if more
+// than 256 sub-steps would be required we cap and let the heat lag the
+// carriers by a frame (visually obvious; physically harmless).
+//
+// All buffers (m_T, m_T_next, m_T_old, m_H_gen, profile lookups via
+// m_mat) are pre-allocated -- strict zero-allocation hot path.
+//
+// References: Wachutka, IEEE Trans. CAD 9 (1990) 1141; Selberherr Sec. 4.5;
+//             Sze Sec. 6.6; Lindefelt, J. Appl. Phys. 75 (1994) 942.
+// =============================================================================
+float DriftDiffusion::solveHeatEquation(
+    double n_i_ref, double V_T,
+    double mu_n_ref, double mu_p_ref,
+    double dt_seconds) noexcept
+{
+    (void)n_i_ref;
+    if (dt_seconds <= 0.0) return 0.0f;
+    if (V_T <= 0.0)        return 0.0f;
+
+    // Cache refresh first: H_R reads m_ni_local; we must use the latest
+    // local-T n_i, otherwise the Wachutka feedback lags one step.
+    refreshLocalParamCache(V_T);
+
+    constexpr double q  = 1.602176634e-19;     // [C]
+    constexpr double kB = 8.617333262e-5;      // [eV/K]
+    const double h  = static_cast<double>(m_cell_pitch_cm);
+    const double h2 = h * h;
+
+    // -------------------------------------------------------------------
+    // 1) Compute H(x,y) once per call and freeze it for the sub-stepping.
+    //    We do not iterate H/T self-consistently inside this call (that's
+    //    what the outer Gummel + heat loop does in the main loop).
+    // -------------------------------------------------------------------
+    for (int j = 0; j < m_H; ++j) {
+        for (int i = 0; i < m_W; ++i) {
+            const std::size_t k = idx(i, j);
+            const auto& mat_C  = profileAt(i, j);
+            const double T_C   = static_cast<double>(m_T[k]);
+
+            // Joule: H_J = sigma * |E|^2  with local sigma at the cell.
+            const double n_C   = static_cast<double>(m_n_dens[k]);
+            const double p_C   = static_cast<double>(m_p_dens[k]);
+            const double E_mag = electricFieldMagAt(i, j);
+
+            const double N_tot = static_cast<double>(m_Nd[k] + m_Na[k]);
+            const double mu_n_C = (N_tot > 1.0e10)
+                ? PhysicsEngine::localMobilityElectron(
+                      mat_C, T_C, N_tot, E_mag)
+                : mu_n_ref;
+            const double mu_p_C = (N_tot > 1.0e10)
+                ? PhysicsEngine::localMobilityHole(
+                      mat_C, T_C, N_tot, E_mag)
+                : mu_p_ref;
+
+            const double sigma_C = q * (n_C * mu_n_C + p_C * mu_p_C);
+            const double H_J     = sigma_C * E_mag * E_mag;       // W/cm^3
+
+            // Recombination: H_R = (R - G) * (E_g + 3 kT) * q
+            //   units: (cm^-3 s^-1) * eV * J/eV = J / (cm^3 s) = W/cm^3
+            const double n_i_C = static_cast<double>(m_ni_local[k]);
+            const double R_srh = PhysicsEngine::recombSRH(
+                n_C, p_C, n_i_C, mat_C.tau_n, mat_C.tau_p);
+            const double R_aug = PhysicsEngine::recombAuger(
+                n_C, p_C, n_i_C, mat_C.C_n_aug, mat_C.C_p_aug);
+            const double G_bt  = PhysicsEngine::kaneBTBT(
+                E_mag, mat_C.A_kane, mat_C.B_kane, mat_C.btbt_isDirect);
+            const double Eg_C  = PhysicsEngine::bandgapAt(mat_C, T_C);   // eV
+            const double E_th  = 3.0 * kB * T_C;                          // eV
+            const double H_R   = (R_srh + R_aug - G_bt) * (Eg_C + E_th) * q;
+
+            m_H_gen[k] = static_cast<float>(H_J + H_R);
+        }
+    }
+
+    // -------------------------------------------------------------------
+    // 2) Compute global CFL bound.  The strict stability condition for
+    //    FTCS with non-uniform kappa is
+    //
+    //       dt_sub * (sum of kappa_face) / (h^2 * rho_cp_C) <= 1
+    //
+    //    so we scan once for the worst cell.  In a uniform reference
+    //    material this reduces to dt * 4 kappa / (h^2 rho_cp) <= 1, i.e.,
+    //    Fourier <= 1/4.
+    // -------------------------------------------------------------------
+    double diff_max = 1.0e-6;     // [1/s] avoid div-by-zero
+    for (int j = 0; j < m_H; ++j) {
+        for (int i = 0; i < m_W; ++i) {
+            const auto& mat = profileAt(i, j);
+            const double rho_cp_C = std::max(mat.rho_cp, 1.0e-12);
+            // Worst case: all four neighbours have the same kappa as
+            // this cell (homogeneous patch). Cheap, slightly conservative.
+            const double diff = 4.0 * mat.kappa / (rho_cp_C * h2);
+            if (diff > diff_max) diff_max = diff;
+        }
+    }
+
+    constexpr double SAFETY = 0.24;     // sub-Fourier safety margin
+    const double dt_max = SAFETY / diff_max;
+    int  n_sub = static_cast<int>(std::ceil(dt_seconds / dt_max));
+    if (n_sub < 1)   n_sub = 1;
+    if (n_sub > 256) n_sub = 256;       // cap; UI sees a one-frame lag
+    const double dt_sub = dt_seconds / static_cast<double>(n_sub);
+
+    // -------------------------------------------------------------------
+    // 3) FTCS sub-stepping. Dirichlet edges at T_ambient (heat sink).
+    // -------------------------------------------------------------------
+    std::copy(m_T.begin(), m_T.end(), m_T_old.begin());
+    float dT_max = 0.0f;
+
+    for (int s = 0; s < n_sub; ++s) {
+        for (int j = 0; j < m_H; ++j) {
+            for (int i = 0; i < m_W; ++i) {
+                const std::size_t k = idx(i, j);
+
+                if (i == 0 || j == 0 || i == m_W - 1 || j == m_H - 1) {
+                    m_T_next[k] = m_T_ambient;
+                    continue;
+                }
+
+                const int ip = i + 1, im = i - 1;
+                const int jp = j + 1, jm = j - 1;
+                const std::size_t kE = idx(ip, j), kW = idx(im, j);
+                const std::size_t kN = idx(i, jp), kS = idx(i, jm);
+
+                const auto& mat_C = profileAt(i, j);
+                const double rho_cp_C = std::max(mat_C.rho_cp, 1.0e-12);
+
+                const double kappa_C = mat_C.kappa;
+                const double kappa_E = profileAt(ip, j).kappa;
+                const double kappa_W = profileAt(im, j).kappa;
+                const double kappa_N = profileAt(i,  jp).kappa;
+                const double kappa_S = profileAt(i,  jm).kappa;
+
+                const double kf_E = 2.0 * kappa_C * kappa_E
+                                  / (kappa_C + kappa_E);
+                const double kf_W = 2.0 * kappa_C * kappa_W
+                                  / (kappa_C + kappa_W);
+                const double kf_N = 2.0 * kappa_C * kappa_N
+                                  / (kappa_C + kappa_N);
+                const double kf_S = 2.0 * kappa_C * kappa_S
+                                  / (kappa_C + kappa_S);
+
+                const double T_C = static_cast<double>(m_T[k]);
+                const double div_term = (
+                      kf_E * (m_T[kE] - T_C)
+                    + kf_W * (m_T[kW] - T_C)
+                    + kf_N * (m_T[kN] - T_C)
+                    + kf_S * (m_T[kS] - T_C)
+                ) / h2;
+
+                const double H = static_cast<double>(m_H_gen[k]);
+                double T_new = T_C + dt_sub * (div_term + H) / rho_cp_C;
+                T_new = std::clamp(T_new, 50.0, 1500.0);
+
+                const float dT = std::abs(
+                    static_cast<float>(T_new - T_C));
+                if (dT > dT_max) dT_max = dT;
+
+                m_T_next[k] = static_cast<float>(T_new);
+            }
+        }
+        m_T.swap(m_T_next);
+    }
+
+    m_dT_max_last = dT_max;
+    return dT_max;
 }
 
 

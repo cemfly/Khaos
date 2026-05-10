@@ -1,5 +1,9 @@
 # Semiconductor Analysis & Simulation Platform
 
+[![Build & Test](https://github.com/cemfly-april2026/Khaos/actions/workflows/build.yml/badge.svg)](https://github.com/cemfly-april2026/Khaos/actions/workflows/build.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![C++20](https://img.shields.io/badge/C%2B%2B-20-blue.svg)](https://en.cppreference.com/w/cpp/20)
+
 A real-time C++20 semiconductor TCAD-style sandbox: pick a material, dope
 it, light it up, run current through it, and watch the band diagram, the
 crystal lattice and the live oscilloscope agree.
@@ -201,6 +205,39 @@ automatically if `assets/font.ttf` does not exist.
 
 ---
 
+## Roadmap
+
+The project follows a phased release plan. Each phase ships a self-contained
+chunk of TCAD physics driven by a clear visualisation goal; phases stack on
+top of each other (every later phase keeps the earlier ones' UI intact).
+
+### Recently delivered
+
+| Phase | Focus                                       | Highlights                                                                                                              |
+| :---: | ------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| 1     | Device Painter + equilibrium Poisson        | Click-and-drag dopant brush; Gauss-Seidel Poisson on the painted N<sub>d</sub>/N<sub>a</sub> grid.                       |
+| 2     | Spatial BandView + breakdown panel          | Bent E<sub>c</sub>(x), E<sub>v</sub>(x), &#124;E&#124;(x) along a horizontal cut; Auger, Chynoweth, Kane BTBT plots.    |
+| 3     | **Poisson-coupled drift-diffusion (Gummel)**| Outer Poisson &harr; Continuity loop with quasi-Fermi splitting (&phi;<sub>n</sub>, &phi;<sub>p</sub>); 3D heatmap.     |
+| 4     | **Scharfetter-Gummel + transient + AC**     | Robust SG flux + Bernoulli function; Backward-Euler transient; Caughey-Thomas high-field saturation; AC small-signal.    |
+| 4+    | **SRH / Auger / BTBT recombination**        | Full detailed-balance R<sub>SRH</sub>, three-particle R<sub>Aug</sub>, Kane band-to-band tunnelling source.              |
+| 5     | **Wachutka electrothermal + heterojunctions** | Per-cell &rho;C<sub>p</sub>&part;<sub>t</sub>T = &nabla;&middot;(&kappa;&nabla;T) + H with Joule + recombination heat; Anderson-rule &Delta;E<sub>c</sub>/&Delta;E<sub>v</sub> for Si/Ge/GaAs heteroepitaxy.|
+
+### Planned
+
+| Phase | Focus                                       | Notes                                                                                                                                                                  |
+| :---: | ------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 6     | **JSON state save / restore**               | One-file dump of the painter doping map, material grid, V<sub>a</sub>, T<sub>amb</sub>, AC settings, and the latest &psi;/n/p/T fields. Drop-in `nlohmann/json` schema with semantic versioning so old captures keep loading. |
+| 7     | Newton-coupled Poisson-DD                   | Drop-in alternative to the decoupled Gummel iteration with Jacobian-free Newton-Krylov for stiff devices (avalanche, deep submicron).                                 |
+| 8     | Adaptive non-uniform grid                   | Local refinement around junctions and depletion edges; doubles spatial accuracy at the same cell count.                                                               |
+| 9     | Frequency-domain AC sweeper                 | Phasor-domain solve of small-signal G(&omega;), C(&omega;), Y/Z parameters; sweep export to CSV / Touchstone.                                                          |
+| 10    | Compact-model extraction                    | Automatic fit of BJT &beta;, V<sub>A</sub>, V<sub>BE,on</sub> and diode I<sub>S</sub>, n, R<sub>s</sub> from the painted-device output -- bridge to SPICE-style design. |
+
+Anything in **Recently delivered** is fully implemented and covered by the
+GoogleTest suite; **Planned** items have agreed designs but no implementation
+yet -- contributions welcome (see [CONTRIBUTING.md](CONTRIBUTING.md)).
+
+---
+
 ## References
 
 - C. Kittel, *Introduction to Solid State Physics*, 8th ed., Wiley.
@@ -209,9 +246,19 @@ automatically if `assets/font.ttf` does not exist.
 - Arora, Hauser, Roulston, "Electron and hole mobilities in silicon",
   IEEE TED-29 (1982).
 - Pierret, *Semiconductor Device Fundamentals*, Addison-Wesley.
+- Selberherr, *Analysis and Simulation of Semiconductor Devices*, Springer.
+- Wachutka, "Rigorous thermodynamic treatment of heat generation and
+  conduction in semiconductor device modeling", IEEE TCAD 9 (1990) 1141.
+- Scharfetter & Gummel, "Large-signal analysis of a silicon Read diode
+  oscillator", IEEE TED 16 (1969) 64.
+- Anderson, "Experiments on Ge-GaAs heterojunctions", Solid-State Electronics
+  5 (1962) 341.
 
 ---
 
 ## License
 
 MIT -- see [LICENSE](LICENSE).
+
+Contributions of any size are welcome; please read
+[CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.

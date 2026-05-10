@@ -58,6 +58,7 @@ const Profile Silicon{
     .rho_cp            = 1.65,       // J/(cm^3 K)
 
     .epsilon_r         = 11.7,
+    .chi               = 4.05,        // [eV] Anderson rule reference
 
     // Auger (Dziewior & Schmid 1977)
     .C_n_aug           = 2.8e-31,
@@ -131,6 +132,7 @@ const Profile GalliumArsenide{
     .rho_cp            = 1.74,
 
     .epsilon_r         = 12.9,
+    .chi               = 4.07,        // [eV] (very close to Si -> small dEc)
 
     // Auger -- direct-gap GaAs is dominated by radiative recomb, so the
     // intrinsic Auger coefficients are much smaller in real life. The
@@ -200,6 +202,7 @@ const Profile Germanium{
     .rho_cp            = 1.65,
 
     .epsilon_r         = 16.0,
+    .chi               = 4.00,        // [eV] (Si/Ge dEc ~ 0.05, dEv ~ 0.42)
 
     // Auger (Conradt & Aengenheister 1972)
     .C_n_aug           = 8.0e-32,

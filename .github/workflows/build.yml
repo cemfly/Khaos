@@ -1,0 +1,234 @@
+# =============================================================================
+# Khaos -- Continuous Integration
+# -----------------------------------------------------------------------------
+# Two build matrices:
+#
+#   1. Linux  / Ubuntu 24.04 / GCC 13      (Release, Debug+Sanitizers)
+#   2. Windows / MSYS2 UCRT64 / GCC        (Release)
+#
+# Each matrix configures CMake, builds the project + the GoogleTest suite,
+# and runs CTest. The Sanitizer job adds AddressSanitizer + UBSan via the
+# project's `-DUSE_SANITIZER=ON` flag (see CMakeLists.txt).
+#
+# A non-blocking clang-format check publishes diff hints on every PR.
+# =============================================================================
+name: Build & Test
+
+on:
+  push:
+    branches: [main, master, develop]
+  pull_request:
+    branches: [main, master, develop]
+  workflow_dispatch:
+
+# Cancel superseded runs on the same branch / PR.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1) Linux Release build + tests
+  # ---------------------------------------------------------------------------
+  linux-gcc:
+    name: Linux / GCC / SFML 3 (Release)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build tools and SFML 3
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            cmake \
+            ninja-build \
+            libsfml-dev \
+            libgl1-mesa-dev \
+            libxrandr-dev \
+            libxcursor-dev \
+            libxi-dev \
+            libudev-dev \
+            libfreetype-dev \
+            libfontconfig1-dev
+
+      - name: Cache FetchContent dependencies
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: linux-deps-${{ hashFiles('CMakeLists.txt') }}
+          restore-keys: |
+            linux-deps-
+
+      - name: Configure (Release, tests ON)
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_TESTS=ON
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Run tests (CTest)
+        run: ctest --test-dir build --output-on-failure --parallel 4
+
+      - name: Upload Linux Release binary
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: SemiconductorSim-linux-x64
+          path: |
+            build/SemiconductorSim
+            build/physics_tests
+          if-no-files-found: warn
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # 2) Linux Debug build with AddressSanitizer + UBSan
+  # ---------------------------------------------------------------------------
+  linux-sanitizers:
+    name: Linux / GCC / ASan + UBSan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    needs: linux-gcc
+
+    env:
+      ASAN_OPTIONS: detect_leaks=0:abort_on_error=1:halt_on_error=1
+      UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build tools and SFML 3
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            cmake \
+            ninja-build \
+            libsfml-dev \
+            libgl1-mesa-dev \
+            libxrandr-dev \
+            libxcursor-dev \
+            libxi-dev \
+            libudev-dev \
+            libfreetype-dev \
+            libfontconfig1-dev
+
+      - name: Cache FetchContent dependencies (sanitizer build)
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: linux-deps-asan-${{ hashFiles('CMakeLists.txt') }}
+          restore-keys: |
+            linux-deps-asan-
+
+      - name: Configure (Debug + Sanitizers + tests)
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DBUILD_TESTS=ON \
+            -DUSE_SANITIZER=ON
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Run tests under sanitizers
+        run: ctest --test-dir build --output-on-failure --parallel 4
+
+  # ---------------------------------------------------------------------------
+  # 3) Windows MSYS2 UCRT64 build + tests
+  # ---------------------------------------------------------------------------
+  windows-msys2:
+    name: Windows / MSYS2 UCRT64 (Release)
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    defaults:
+      run:
+        shell: msys2 {0}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup MSYS2 (UCRT64)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            git
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-sfml
+            mingw-w64-ucrt-x86_64-pkg-config
+
+      - name: Cache FetchContent dependencies
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: windows-ucrt64-deps-${{ hashFiles('CMakeLists.txt') }}
+          restore-keys: |
+            windows-ucrt64-deps-
+
+      - name: Configure (Release, tests ON)
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_TESTS=ON
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Run tests (CTest)
+        run: ctest --test-dir build --output-on-failure --parallel 4
+
+      - name: Upload Windows Release binary
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: SemiconductorSim-windows-x64
+          path: |
+            build/SemiconductorSim.exe
+            build/physics_tests.exe
+            build/*.dll
+          if-no-files-found: warn
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # 4) clang-format dry-run -- non-blocking style hints
+  # ---------------------------------------------------------------------------
+  clang-format:
+    name: Code Style (clang-format, advisory)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install clang-format
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-format
+
+      - name: Verify formatting (dry-run)
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          mapfile -t files < <(git ls-files 'src/*.cpp' 'src/*.hpp' 'tests/*.cpp')
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No C/C++ sources to check."
+            exit 0
+          fi
+          clang-format --version
+          clang-format --dry-run -Werror "${files[@]}"

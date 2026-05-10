@@ -380,6 +380,67 @@ public:
         double depletion_width_cm) noexcept;
 
     // -------------------------------------------------------------------
+    // Anderson rule -- heterojunction band offsets        [Phase 5]
+    //
+    //   E_c(x) = -q psi(x) - chi(x)
+    //   E_v(x) = E_c(x) - E_g(x)
+    //
+    // At an A/B interface (Anderson 1962, Sze Sec. 5.1):
+    //
+    //   Delta E_c =  chi_A - chi_B                 [eV]
+    //   Delta E_v =  (chi_B - chi_A) + (E_g,B - E_g,A)
+    //             = -Delta E_c + Delta E_g
+    //
+    // The conduction-band step is the difference of electron affinities;
+    // the valence-band step inherits the chi step (with reversed sign)
+    // and the bandgap mismatch.  Si/Ge yields a "type-II" alignment
+    // (Delta E_c ~ 0.05 eV, Delta E_v ~ 0.42 eV), which is the textbook
+    // SiGe HBT result. Si/GaAs is broken-gap.
+    //
+    // Returned struct is plain POD (zero allocations).
+    // -------------------------------------------------------------------
+    struct BandOffsets {
+        double dEc;     // [eV]  E_c,B - E_c,A  (positive: B's E_c is higher)
+        double dEv;     // [eV]  E_v,B - E_v,A  (positive: B's E_v is higher)
+        double dEg;     // [eV]  E_g,B - E_g,A
+    };
+
+    [[nodiscard]] static constexpr BandOffsets andersonOffsets(
+        const material::Profile& A, const material::Profile& B,
+        double T = 300.0) noexcept
+    {
+        const double Eg_A = A.Eg0 - (A.varshni_a * T * T) / (T + A.varshni_b);
+        const double Eg_B = B.Eg0 - (B.varshni_a * T * T) / (T + B.varshni_b);
+        const double dEc  = A.chi - B.chi;
+        const double dEg  = Eg_B - Eg_A;
+        const double dEv  = dEg - dEc;       // dEv = dEg - dEc
+        return BandOffsets{ dEc, dEv, dEg };
+    }
+
+    // -------------------------------------------------------------------
+    // Per-cell band edges for an absolute reference frame (vacuum-pinned)
+    //
+    //   E_c(x) = -psi(x) - (chi(x) - chi_ref)         [eV, q = 1]
+    //   E_v(x) =  E_c(x) - E_g(x)                     [eV]
+    //
+    // Used by the BandView heterojunction renderer; lets the engine
+    // expose the discontinuities at material brushes for free.
+    // -------------------------------------------------------------------
+    [[nodiscard]] static constexpr double conductionBandEdge(
+        double psi_volts,
+        const material::Profile& mat_local,
+        const material::Profile& mat_ref) noexcept
+    {
+        return -psi_volts - (mat_local.chi - mat_ref.chi);
+    }
+    [[nodiscard]] static double valenceBandEdge(
+        double psi_volts,
+        const material::Profile& mat_local,
+        const material::Profile& mat_ref,
+        double T = 300.0) noexcept;
+
+
+    // -------------------------------------------------------------------
     // Band-to-band tunneling -- Kane model    (Kane 1961, Sze Sec. 4.3)
     //
     //   G_BTBT(E) = A_kane * E^P * exp(-B_kane / E)     [cm^-3 / s]

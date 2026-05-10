@@ -526,28 +526,76 @@ void BandView::renderSpatial(const PhysicsEngine&  physics,
     }
 
     // ---- Bent E_c / E_v polylines ---------------------------------------
+    //
+    // Phase 5: when the per-cell material id flips between i and i+1 the
+    // sampleHorizontalCut path returns a step in E_c / E_v -- the line
+    // strip then naturally shows the discontinuity.  We emit it as TWO
+    // separate strips (one per material region) plus a vertical riser
+    // at the interface so the step reads cleanly even at low DPI.
     {
+        const auto Ec_col = palette::ConductionBand;
+        const auto Ev_col = palette::ValenceBand;
+
         sf::VertexArray ec(sf::PrimitiveType::LineStrip);
         sf::VertexArray ev(sf::PrimitiveType::LineStrip);
+
+        auto flushAndRestart = [&](int iBoundary) {
+            if (ec.getVertexCount() > 0) m_rt.draw(ec);
+            if (ev.getVertexCount() > 0) m_rt.draw(ev);
+            ec.clear();
+            ev.clear();
+
+            // Vertical risers at the metallurgical material boundary --
+            // makes the dEc / dEv discontinuities pop visually.
+            const float xR_step = xCellToPx(iBoundary, W_cells, xL, xR);
+            sf::VertexArray riser(sf::PrimitiveType::Lines);
+            riser.append(sf::Vertex{{xR_step, eToY(m_Ec_cut[iBoundary - 1])},
+                                    sf::Color(Ec_col.r, Ec_col.g, Ec_col.b, 200)});
+            riser.append(sf::Vertex{{xR_step, eToY(m_Ec_cut[iBoundary])},
+                                    sf::Color(Ec_col.r, Ec_col.g, Ec_col.b, 200)});
+            riser.append(sf::Vertex{{xR_step, eToY(m_Ev_cut[iBoundary - 1])},
+                                    sf::Color(Ev_col.r, Ev_col.g, Ev_col.b, 200)});
+            riser.append(sf::Vertex{{xR_step, eToY(m_Ev_cut[iBoundary])},
+                                    sf::Color(Ev_col.r, Ev_col.g, Ev_col.b, 200)});
+            m_rt.draw(riser);
+
+            const double dEc_step =
+                static_cast<double>(m_Ec_cut[iBoundary] - m_Ec_cut[iBoundary - 1]);
+            const double dEv_step =
+                static_cast<double>(m_Ev_cut[iBoundary] - m_Ev_cut[iBoundary - 1]);
+            m_rt.draw(makeText(font,
+                "dEc = " + fix(dEc_step, 3) + " eV", 10,
+                sf::Color(170, 220, 255, 220),
+                {xR_step + 4.f, eToY(0.5f * (m_Ec_cut[iBoundary - 1]
+                                           + m_Ec_cut[iBoundary])) - 14.f}));
+            m_rt.draw(makeText(font,
+                "dEv = " + fix(dEv_step, 3) + " eV", 10,
+                sf::Color(255, 200, 170, 220),
+                {xR_step + 4.f, eToY(0.5f * (m_Ev_cut[iBoundary - 1]
+                                           + m_Ev_cut[iBoundary])) + 4.f}));
+        };
+
         for (int i = 0; i < W_cells; ++i) {
             const float x = xCellToPx(i, W_cells, xL, xR);
-            ec.append(sf::Vertex{{x, eToY(m_Ec_cut[i])},
-                                 palette::ConductionBand});
-            ev.append(sf::Vertex{{x, eToY(m_Ev_cut[i])},
-                                 palette::ValenceBand});
+            ec.append(sf::Vertex{{x, eToY(m_Ec_cut[i])}, Ec_col});
+            ev.append(sf::Vertex{{x, eToY(m_Ev_cut[i])}, Ev_col});
+
+            if (i > 0 && dd.materialAt(i - 1, j_cut) != dd.materialAt(i, j_cut)) {
+                // Boundary between i-1 (already in strip) and i (just added).
+                // Flush the strip for the previous material *up to* i, draw
+                // the riser, then start a fresh strip beginning at i.
+                flushAndRestart(i);
+                ec.append(sf::Vertex{{x, eToY(m_Ec_cut[i])}, Ec_col});
+                ev.append(sf::Vertex{{x, eToY(m_Ev_cut[i])}, Ev_col});
+            }
         }
-        // Light "shadow" copies for thicker line feel.
-        m_rt.draw(ec);
-        m_rt.draw(ev);
-        for (int dy = 1; dy <= 1; ++dy) {
-            sf::VertexArray ec2 = ec, ev2 = ev;
-            for (std::size_t k = 0; k < ec2.getVertexCount(); ++k)
-                ec2[k].position.y += static_cast<float>(dy);
-            for (std::size_t k = 0; k < ev2.getVertexCount(); ++k)
-                ev2[k].position.y += static_cast<float>(dy);
-            m_rt.draw(ec2);
-            m_rt.draw(ev2);
-        }
+        // Final flush for the last region.
+        if (ec.getVertexCount() > 0) m_rt.draw(ec);
+        if (ev.getVertexCount() > 0) m_rt.draw(ev);
+
+        // Light "shadow" copy of the assembled strips would help readability,
+        // but the per-segment flush above already produces a clean stepped
+        // profile at junctions -- skip the second pass.
     }
 
     // ---- Edge labels ----------------------------------------------------

@@ -1,0 +1,128 @@
+# =============================================================================
+# Khaos -- clang-format style
+# -----------------------------------------------------------------------------
+# Modern, readable, C++20-aware (concepts, requires-clauses, ranges, modules).
+# Based on LLVM with a 100-column hard limit and 4-space indentation.
+#
+# Run:
+#   clang-format -i src/*.cpp src/*.hpp tests/*.cpp
+#
+# CI runs `clang-format --dry-run -Werror` on every PR (see
+# .github/workflows/build.yml :: clang-format job) -- the result is advisory
+# only, so the workflow does not gate merging.
+# =============================================================================
+---
+Language: Cpp
+BasedOnStyle: LLVM
+Standard: c++20
+
+# ---- Width / indentation ----------------------------------------------------
+ColumnLimit: 100
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ContinuationIndentWidth: 4
+ConstructorInitializerIndentWidth: 4
+AccessModifierOffset: -4
+NamespaceIndentation: None
+IndentCaseLabels: false
+IndentExternBlock: NoIndent
+IndentPPDirectives: AfterHash
+IndentRequiresClause: true
+RequiresClausePosition: OwnLine
+LambdaBodyIndentation: Signature
+
+# ---- Braces -----------------------------------------------------------------
+BreakBeforeBraces: Attach
+AllowShortBlocksOnASingleLine: Empty
+AllowShortFunctionsOnASingleLine: Empty
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortLambdasOnASingleLine: All
+AllowShortCaseLabelsOnASingleLine: false
+AllowShortEnumsOnASingleLine: false
+Cpp11BracedListStyle: true
+
+# ---- Templates / functions --------------------------------------------------
+AlwaysBreakTemplateDeclarations: Yes
+BinPackArguments: false
+BinPackParameters: false
+AllowAllArgumentsOnNextLine: true
+AllowAllParametersOfDeclarationOnNextLine: true
+PackConstructorInitializers: NextLine
+BreakConstructorInitializers: BeforeComma
+BreakBeforeBinaryOperators: None
+BreakBeforeTernaryOperators: true
+AlwaysBreakAfterReturnType: None
+
+# ---- Pointers / references --------------------------------------------------
+PointerAlignment: Left
+ReferenceAlignment: Left
+DerivePointerAlignment: false
+QualifierAlignment: Leave
+
+# ---- Includes ---------------------------------------------------------------
+IncludeBlocks: Regroup
+SortIncludes: CaseInsensitive
+IncludeCategories:
+  - Regex:           '^<.*\.h>$'           # C system headers (e.g. <math.h>)
+    Priority:        1
+  - Regex:           '^<[^.]*>$'           # C++ standard library
+    Priority:        2
+  - Regex:           '^<(SFML|imgui|imgui-SFML|implot|gtest)/.*'
+    Priority:        3                     # well-known third-party packages
+  - Regex:           '^<.*'                # other third-party
+    Priority:        4
+  - Regex:           '.*'                  # project-local headers (quoted)
+    Priority:        5
+
+# ---- Spaces -----------------------------------------------------------------
+SpaceAfterCStyleCast: false
+SpaceAfterTemplateKeyword: true
+SpaceBeforeAssignmentOperators: true
+SpaceBeforeParens: ControlStatements
+SpaceBeforeRangeBasedForLoopColon: true
+SpaceBeforeSquareBrackets: false
+SpaceInEmptyParentheses: false
+SpacesBeforeTrailingComments: 2
+SpacesInAngles: false
+SpacesInCStyleCastParentheses: false
+SpacesInContainerLiterals: false
+SpacesInParentheses: false
+SpacesInSquareBrackets: false
+SpaceAroundPointerQualifiers: Default
+
+# ---- Alignment --------------------------------------------------------------
+AlignAfterOpenBracket: Align
+AlignArrayOfStructures: None
+AlignConsecutiveAssignments: false
+AlignConsecutiveDeclarations: false
+AlignConsecutiveMacros: AcrossEmptyLines
+AlignEscapedNewlines: Right
+AlignOperands: Align
+AlignTrailingComments: true
+
+# ---- Penalties (tuned for 100-col, prefer breaking arg lists over long lines)
+PenaltyBreakAssignment: 25
+PenaltyBreakBeforeFirstCallParameter: 19
+PenaltyBreakComment: 300
+PenaltyBreakFirstLessLess: 120
+PenaltyBreakString: 1000
+PenaltyBreakTemplateDeclaration: 10
+PenaltyExcessCharacter: 1000000
+PenaltyReturnTypeOnItsOwnLine: 60
+
+# ---- Misc -------------------------------------------------------------------
+FixNamespaceComments: true
+ShortNamespaceLines: 4
+SortUsingDeclarations: true
+KeepEmptyLinesAtTheStartOfBlocks: false
+MaxEmptyLinesToKeep: 2
+EmptyLineBeforeAccessModifier: LogicalBlock
+EmptyLineAfterAccessModifier: Never
+SeparateDefinitionBlocks: Always
+RemoveBracesLLVM: false
+ReflowComments: true
+DeriveLineEnding: false
+UseCRLF: false
+InsertNewlineAtEOF: true

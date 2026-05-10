@@ -49,6 +49,47 @@ endif()
 
 option(FETCH_SFML  "Download SFML if not found"             OFF)
 option(BUILD_TESTS "Build the GoogleTest unit-test suite"   OFF)
+option(USE_SANITIZER
+       "Enable AddressSanitizer + UndefinedBehaviorSanitizer (GCC/Clang only)"
+       OFF)
+
+# -----------------------------------------------------------------------------
+# Sanitizers (opt-in -- AddressSanitizer + UndefinedBehaviorSanitizer)
+# -----------------------------------------------------------------------------
+# Toggle with `-DUSE_SANITIZER=ON`.  Adds `-fsanitize=address,undefined` to
+# both compile *and* link lines (sanitizers must see every translation unit
+# *and* the final link to get usable diagnostics).
+#
+# Notes
+#   * GCC / Clang only.  MSVC ships its own AddressSanitizer with different
+#     compile/link flags and a separate runtime; it is intentionally skipped
+#     here so this option remains a one-toggle switch.
+#   * Pair with `-DCMAKE_BUILD_TYPE=Debug` for line-accurate stack traces.
+#   * Set `ASAN_OPTIONS` / `UBSAN_OPTIONS` env vars at run time, e.g.:
+#         ASAN_OPTIONS=detect_leaks=1:abort_on_error=1
+#         UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1
+#   * Sample full configure line:
+#         cmake -S . -B build -G Ninja \
+#               -DCMAKE_BUILD_TYPE=Debug \
+#               -DBUILD_TESTS=ON \
+#               -DUSE_SANITIZER=ON
+# -----------------------------------------------------------------------------
+if(USE_SANITIZER)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        message(STATUS "Sanitizers ENABLED: address,undefined "
+                       "(compiler=${CMAKE_CXX_COMPILER_ID})")
+        add_compile_options(
+            -fsanitize=address,undefined
+            -fno-omit-frame-pointer
+            -fno-sanitize-recover=all
+            -g)
+        add_link_options(-fsanitize=address,undefined)
+    else()
+        message(WARNING
+            "USE_SANITIZER=ON is GCC/Clang only; ignored for "
+            "${CMAKE_CXX_COMPILER_ID}.")
+    endif()
+endif()
 
 include(FetchContent)
 

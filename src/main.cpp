@@ -362,6 +362,14 @@ struct UIState {
     float       brushLogDose      = 17.0f;     // log10 cm^-3
     bool        showDopingOverlay = true;
 
+    // -- Phase 5: Material brush + Wachutka thermal -----------------------
+    int            materialBrush  = 0;        // material::Kind index
+    bool           showMaterialOverlay = true;
+    bool           wachutkaThermal     = true;   // run solveHeatEquation
+    float          T_peak_local        = 300.0f;
+    float          T_mean_local        = 300.0f;
+    float          dT_step_last        = 0.0f;
+
     // -- Phase 1: Poisson solver ------------------------------------------
     int         poissonIters      = 60;
     float       poissonOmega      = 0.85f;
@@ -863,6 +871,26 @@ void drawControlsWindow(PhysicsEngine& physics,
                                0.0001f, 0.1f, "%.4f",
                                ImGuiSliderFlags_Logarithmic)) {
             dd.setACProbe(ui.acProbeEnabled, ui.acFreq_Hz, ui.acAmp_V);
+        }
+
+        // ---- Phase 5: Wachutka local thermal coupling ------------------
+        ImGui::SeparatorText("Wachutka thermal coupling");
+        ImGui::Checkbox("Solve local heat equation", &ui.wachutkaThermal);
+        HelpMarker(
+            "Enables the per-cell heat solver each transient step:\n"
+            "  rho Cp dT/dt = div(kappa grad T) + H\n"
+            "with H = (J_n+J_p).E + (R - G_BTBT)(E_g + 3kT).\n"
+            "Hot cells narrow E_g and inflate n_i exponentially -- the "
+            "Wachutka feedback loop that drives thermal runaway.\n"
+            "Reference: Wachutka, IEEE TCAD 9 (1990) 1141; Selberherr 4.5.");
+
+        ImGui::Text("T_peak    = %7.2f K  (dT_step = %+.3f K)",
+                    ui.T_peak_local, ui.dT_step_last);
+        ImGui::Text("T_mean    = %7.2f K", ui.T_mean_local);
+        ImGui::Text("T_ambient = %7.2f K", dd.ambientTemperature());
+        if (ui.T_peak_local - dd.ambientTemperature() > 30.0f) {
+            ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.25f, 1.0f),
+                "Hotspot active: dT > 30 K -- watch n_i / I rise.");
         }
     }
 
@@ -1422,7 +1450,11 @@ void drawDevicePainterWindow(DriftDiffusion& dd,
     ImGui::TextDisabled("Brush");
     int brush = static_cast<int>(ui.currentBrush);
     const char* brushLabels[] = {
-        "None", "N-dopant (donor)", "P-dopant (acceptor)", "Eraser"
+        "None",
+        "N-dopant (donor)",
+        "P-dopant (acceptor)",
+        "Eraser",
+        "Material (Si/Ge/GaAs)",        // [Phase 5]
     };
     ImGui::Combo("##brush", &brush, brushLabels, IM_ARRAYSIZE(brushLabels));
     ui.currentBrush = static_cast<BrushKind>(brush);
@@ -1434,12 +1466,32 @@ void drawDevicePainterWindow(DriftDiffusion& dd,
     HelpMarker(
         "Click & drag to stamp donors (N) or acceptors (P). Each frame "
         "the brush adds the chosen dose to every cell within the circular "
-        "footprint. Eraser zeroes Nd, Na and the cell tag back to bulk.");
+        "footprint. Eraser zeroes Nd, Na and the cell tag back to bulk. "
+        "Material brush stamps a heterojunction patch (Si/Ge/GaAs).");
 
     ImGui::SameLine();
     if (ImGui::Button("Clear all doping")) {
         dd.clearDoping();
         ui.flashStatus("Painter canvas cleared");
+    }
+
+    // ---- Phase 5: Material brush controls -------------------------------
+    if (ui.currentBrush == BrushKind::Material) {
+        ImGui::Combo("Material kind", &ui.materialBrush,
+                     material::kLabels, material::kCount);
+        HelpMarker(
+            "Anderson rule (Sze 5.1):\n"
+            "  dEc = chi_A - chi_B\n"
+            "  dEv = (chi_B - chi_A) + (E_g,B - E_g,A)\n"
+            "Si chi=4.05, Ge chi=4.00, GaAs chi=4.07 eV.\n"
+            "Stamping Ge next to Si makes a textbook SiGe HBT base "
+            "(small dEc ~0.05 eV, large dEv ~0.42 eV: holes blocked).");
+    }
+    ImGui::Checkbox("Overlay material map", &ui.showMaterialOverlay);
+    ImGui::SameLine();
+    if (ImGui::Button("Clear materials")) {
+        dd.clearMaterials();
+        ui.flashStatus("Material map reset to engine reference");
     }
 
     // Quick presets for repeatable lab-style structures.
@@ -1494,6 +1546,23 @@ void drawDevicePainterWindow(DriftDiffusion& dd,
     auto* dl = ImGui::GetWindowDrawList();
     dl->AddRectFilled(p0, p1, IM_COL32(20, 20, 28, 255));
 
+    // ---- Material overlay (Phase 5: per-cell Si/Ge/GaAs tint) ----------
+    if (ui.showMaterialOverlay) {
+        for (int j = 0; j < dd.height(); ++j) {
+            for (int i = 0; i < dd.width(); ++i) {
+                const auto kind = dd.materialAt(i, j);
+                const auto& mat = material::byKind(kind);
+                // Subtle base tint -- material colour at low alpha so the
+                // doping overlay above remains the dominant visual.
+                const ImU32 mcol = IM_COL32(mat.atomR, mat.atomG, mat.atomB, 60);
+                const ImVec2 c0(p0.x + cellPx * i,
+                                p0.y + cellPx * j);
+                const ImVec2 c1(c0.x + cellPx, c0.y + cellPx);
+                dl->AddRectFilled(c0, c1, mcol);
+            }
+        }
+    }
+
     // ---- Heatmap overlay (Nd-Na, signed log) ----------------------------
     if (ui.showDopingOverlay) {
         for (int j = 0; j < dd.height(); ++j) {
@@ -1546,8 +1615,15 @@ void drawDevicePainterWindow(DriftDiffusion& dd,
         const ImVec2 mp = ImGui::GetMousePos();
         const float u = (mp.x - p0.x) / canvasSz.x;
         const float v = (mp.y - p0.y) / canvasSz.y;
-        const double dose = std::pow(10.0, ui.brushLogDose);
-        dd.paintBrush(u, v, ui.currentBrush, dose, ui.brushRadius);
+        if (ui.currentBrush == BrushKind::Material) {
+            // Phase 5: stamp local material id (heterojunction painter).
+            const auto kind = static_cast<material::Kind>(
+                std::clamp(ui.materialBrush, 0, material::kCount - 1));
+            dd.paintMaterialBrush(u, v, kind, ui.brushRadius);
+        } else {
+            const double dose = std::pow(10.0, ui.brushLogDose);
+            dd.paintBrush(u, v, ui.currentBrush, dose, ui.brushRadius);
+        }
         if (dd.deviceMode() != DeviceMode::Painter)
             dd.setDeviceMode(DeviceMode::Painter);
     }
@@ -1571,6 +1647,12 @@ void drawDevicePainterWindow(DriftDiffusion& dd,
             case BrushKind::NDopant: col = IM_COL32( 80, 180, 255, 220); break;
             case BrushKind::PDopant: col = IM_COL32(255, 160,  80, 220); break;
             case BrushKind::Eraser:  col = IM_COL32(220,  60,  60, 220); break;
+            case BrushKind::Material: {
+                const auto& mat = material::byKind(static_cast<material::Kind>(
+                    std::clamp(ui.materialBrush, 0, material::kCount - 1)));
+                col = IM_COL32(mat.atomR, mat.atomG, mat.atomB, 240);
+                break;
+            }
             default: break;
         }
         dl->AddCircle(mp, ui.brushRadius * cellPx, col, 0, 2.0f);
@@ -1585,11 +1667,16 @@ void drawDevicePainterWindow(DriftDiffusion& dd,
             static_cast<int>((mp.y - p0.y) / cellPx), 0, dd.height() - 1);
         if (ImGui::BeginTooltip()) {
             ImGui::Text("(i,j) = (%d, %d)", i, j);
-            ImGui::Text("Nd  = %.2e cm^-3", dd.donorAt(i, j));
-            ImGui::Text("Na  = %.2e cm^-3", dd.acceptorAt(i, j));
-            ImGui::Text("psi = %+.4f V",    dd.psiAt(i, j));
-            ImGui::Text("dEc = %+.4f eV",   dd.bandShiftAt(i, j));
-            ImGui::Text("|E| = %.3e V/cm",  dd.electricFieldMagAt(i, j));
+            const auto& mat_local = dd.profileAt(i, j);
+            ImGui::Text("Material : %.*s",
+                static_cast<int>(mat_local.name.size()), mat_local.name.data());
+            ImGui::Text("chi      = %.3f eV", mat_local.chi);
+            ImGui::Text("E_g(T)   = %.3f eV", dd.localBandgapAt(i, j));
+            ImGui::Text("T_lat    = %.2f K",  dd.temperatureFieldAt(i, j));
+            ImGui::Text("Nd       = %.2e cm^-3", dd.donorAt(i, j));
+            ImGui::Text("Na       = %.2e cm^-3", dd.acceptorAt(i, j));
+            ImGui::Text("psi      = %+.4f V",    dd.psiAt(i, j));
+            ImGui::Text("|E|      = %.3e V/cm",  dd.electricFieldMagAt(i, j));
             ImGui::EndTooltip();
         }
         (void)physics;
@@ -1725,6 +1812,9 @@ void drawTopology3DWindow(const DriftDiffusion& dd,
         "Electron density n(x,y) [cm^-3, log10]",
         "Hole density p(x,y) [cm^-3, log10]",
         "Electric field |E|(x,y) [V/cm, log10]",
+        "Lattice Temperature T(x,y) [K]",          // [Phase 5]
+        "Heat source H(x,y) [W/cm^3, log10]",      // [Phase 5]
+        "Bandgap E_g(x,y,T) [eV]",                 // [Phase 5]
     };
     ImGui::Combo("Field", &ui.topo3DField,
                  fieldLabels, IM_ARRAYSIZE(fieldLabels));
@@ -1781,6 +1871,30 @@ void drawTopology3DWindow(const DriftDiffusion& dd,
                 }
             break;
         }
+        case 4: { // [Phase 5] Lattice temperature T(x,y) [K] (linear)
+            for (int j = 0; j < H; ++j)
+                for (int i = 0; i < W; ++i)
+                    scratch[static_cast<std::size_t>(j * W + i)] =
+                        dd.temperatureFieldAt(i, j);
+            break;
+        }
+        case 5: { // [Phase 5] Heat source H(x,y) [W/cm^3, log10]
+            const auto& H_field = dd.heatGenField();
+            for (int j = 0; j < H; ++j)
+                for (int i = 0; i < W; ++i) {
+                    const std::size_t k = static_cast<std::size_t>(j * W + i);
+                    scratch[k] = static_cast<float>(
+                        safeLog10(static_cast<double>(H_field[k])));
+                }
+            break;
+        }
+        case 6: { // [Phase 5] Local bandgap E_g(x,y,T) [eV] (linear)
+            for (int j = 0; j < H; ++j)
+                for (int i = 0; i < W; ++i)
+                    scratch[static_cast<std::size_t>(j * W + i)] =
+                        static_cast<float>(dd.localBandgapAt(i, j));
+            break;
+        }
         default: break;
     }
 
@@ -1801,7 +1915,11 @@ void drawTopology3DWindow(const DriftDiffusion& dd,
                           ImVec2(-1.0f, ImGui::GetContentRegionAvail().y - 24.f),
                           ImPlotFlags_NoLegend))
     {
-        ImPlot::PushColormap(ImPlotColormap_Viridis);
+        // Phase 5: hot fields use a perceptually-warm map so the eye
+        // immediately reads them as "temperature".  Others stay viridis.
+        const ImPlotColormap cmap = (ui.topo3DField == 4 || ui.topo3DField == 5)
+            ? ImPlotColormap_Hot : ImPlotColormap_Viridis;
+        ImPlot::PushColormap(cmap);
         ImPlot::SetupAxes("x [cell]", "y [cell]",
                           ImPlotAxisFlags_NoGridLines,
                           ImPlotAxisFlags_NoGridLines | ImPlotAxisFlags_Invert);
@@ -2018,6 +2136,20 @@ int main() {
                         ui.gummelOmegaPsi,
                         ui.gummelOmegaPhi);
                     if (ui.acProbeEnabled) ui.V_bias = dd->appliedBias();
+
+                    // Phase 5: Wachutka local heat solve riding on the
+                    // same dt as the carrier step. The result feeds back
+                    // into n_i / E_g via refreshLocalParamCache() inside
+                    // the next Gummel call -- closes the runaway loop.
+                    if (ui.wachutkaThermal) {
+                        ui.dT_step_last = dd->solveHeatEquation(
+                            n_i, V_T,
+                            physics->getElectronMobility(),
+                            physics->getHoleMobility(),
+                            dd->timeStep());
+                        ui.T_peak_local = dd->maxTemperature();
+                        ui.T_mean_local = dd->meanTemperature();
+                    }
                 } else {
                     ui.gummelResidual = dd->solveGummel(
                         n_i, V_T, mat.epsilon_r,

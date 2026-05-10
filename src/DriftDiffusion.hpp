@@ -71,10 +71,11 @@ enum class CellRegion : std::uint8_t {
 // Brush selection used by the Device Painter UI.
 // -----------------------------------------------------------------------------
 enum class BrushKind : std::uint8_t {
-    None    = 0,
-    NDopant = 1,    // stamps donors    (Nd += dose)
-    PDopant = 2,    // stamps acceptors (Na += dose)
-    Eraser  = 3,    // resets the painted cell to intrinsic
+    None     = 0,
+    NDopant  = 1,    // stamps donors    (Nd += dose)
+    PDopant  = 2,    // stamps acceptors (Na += dose)
+    Eraser   = 3,    // resets the painted cell to intrinsic
+    Material = 4,    // [Phase 5] paints local material id (Si / Ge / GaAs)
 };
 
 
@@ -124,6 +125,36 @@ public:
     [[nodiscard]] double acceptorAt (int i, int j) const noexcept;
     void setCellPitchCm(float h) noexcept;
     [[nodiscard]] float cellPitchCm() const noexcept { return m_cell_pitch_cm; }
+
+    // ---- Heterojunction painter [Phase 5] -------------------------------
+    //
+    // The grid carries a per-cell material id (default = the engine's
+    // global reference material). The user paints alternative materials
+    // onto subregions to create heterojunctions; the Poisson / continuity
+    // / heat solvers all read material parameters per cell from there.
+    //
+    //   id 0 = "reference" (whatever PhysicsEngine::setMaterial selected)
+    //   id 1, 2, ... = painted overrides; we currently support 3 options
+    //                  enumerated by material::Kind (Si=0, GaAs=1, Ge=2).
+    //
+    // setReferenceMaterial keeps the canvas baseline aligned with the
+    // engine's selection (call from the UI when the Material dropdown
+    // changes).  paintMaterialBrush stamps a circular region the same
+    // way paintBrush does for dopants -- strictly zero-allocation.
+    void  setReferenceMaterial(material::Kind k) noexcept;
+    void  paintMaterialBrush(float u, float v,
+                             material::Kind k,
+                             int radius_cells = 3) noexcept;
+    void  clearMaterials() noexcept;            // restore reference everywhere
+
+    [[nodiscard]] material::Kind materialAt(int i, int j) const noexcept;
+    [[nodiscard]] const material::Profile& profileAt(int i, int j) const noexcept;
+    [[nodiscard]] const std::vector<std::uint8_t>& materialField() const noexcept {
+        return m_mat;
+    }
+    [[nodiscard]] material::Kind referenceMaterial() const noexcept {
+        return m_ref_mat;
+    }
 
     // ---- Poisson solver  [Phase 1] --------------------------------------
     //
@@ -295,6 +326,47 @@ public:
         double T_lattice,
         double dV = 0.005) noexcept;
 
+    // ---- Phase 5 -- Wachutka local heat equation ------------------------
+    //
+    // Solves the lattice-heat equation on the grid:
+    //
+    //     rho Cp dT/dt = div(kappa grad T) + H(x,y)
+    //
+    // with the Wachutka heat source decomposed into:
+    //
+    //   H_J = (J_n + J_p) . E                 -- Joule (dissipation)
+    //   H_R = (R_SRH + R_Aug - G_BTBT) . (E_g + 3 k_B T)
+    //                                          -- Recombination heating
+    //   H = H_J + H_R                          -- per cell, [W/cm^3]
+    //
+    // Joule current is reconstructed from the Scharfetter-Gummel face
+    // fluxes already iterated by solveContinuity*.  Heterogeneous kappa
+    // is handled by harmonic-mean face conductivities; the FTCS step is
+    // CFL-clamped and sub-stepped to honour stability.
+    //
+    //   * Reference: Wachutka, IEEE Trans. CAD 9 (1990) 1141;
+    //                Selberherr Sec. 4.5; Sze Sec. 6.6.
+    //
+    // dt_seconds [s] is the wall-clock step the heat field has to span;
+    // internally we sub-step to keep the FTCS Fourier number below 0.24
+    // on the *fastest* (smallest rho_cp / largest kappa) cell. Returns
+    // the L_infinity change in T over the call (Kelvin) -- a cheap
+    // convergence indicator for the UI.
+    [[nodiscard]] float solveHeatEquation(
+        double n_i_ref, double V_T,
+        double mu_n_ref, double mu_p_ref,
+        double dt_seconds) noexcept;
+
+    // Lightweight accessors for the local-T feedback that the engine and
+    // UI consume each frame.
+    [[nodiscard]] float    temperatureFieldAt(int i, int j) const noexcept;
+    [[nodiscard]] double   localBandgapAt    (int i, int j) const noexcept;
+    [[nodiscard]] double   localIntrinsicAt  (int i, int j) const noexcept;
+    [[nodiscard]] double   localElectronAffinityAt(int i, int j) const noexcept;
+    [[nodiscard]] const std::vector<float>& heatGenField() const noexcept {
+        return m_H_gen;
+    }
+
     // Approximate collector-emitter current (sweep-out rate). Useful for
     // reporting transistor "operating point" in the readouts panel.
     [[nodiscard]] float collectorCurrent() const noexcept { return m_I_C; }
@@ -434,6 +506,50 @@ private:
     double m_ac_freq    = 1.0e6;          // [Hz]
     double m_ac_amp     = 0.005;          // [V]
     float  m_V_dc_base  = 0.0f;           // DC operating point used by AC
+
+    // ---- Phase 5 -- Heterojunctions + Wachutka thermal -----------------
+    //
+    // Per-cell material id (encodes material::Kind). Cells flagged as
+    // "reference" defer to m_ref_mat; painted cells override.
+    std::vector<std::uint8_t> m_mat;
+    material::Kind m_ref_mat = material::Kind::Silicon;
+
+    // Per-cell parameter cache, refreshed once per outer Poisson/Gummel
+    // call by refreshLocalParamCache().  Putting these here turns five
+    // material::byKind + intrinsicCarrierAt lookups per inner-sweep cell
+    // into a single load -- crucial for the hot path.
+    //
+    //   m_ni_local      : n_i(material(x), T(x))                 [cm^-3]
+    //   m_eps_r_local   : eps_r(material(x))                     [-]
+    //   m_delta_n       : Anderson chi-shift for electrons       [V]
+    //                    delta_n(x) = (chi(x) - chi_ref) / q
+    //   m_delta_p       : Anderson chi+gap shift for holes       [V]
+    //                    delta_p(x) = (chi(x) - chi_ref + Eg(x) - Eg_ref) / q
+    //
+    // The carrier densities take the form
+    //   n(x) = n_i_ref * exp((psi + delta_n - phi_n) / V_T)
+    //   p(x) = n_i_ref * exp((phi_p - psi - delta_p) / V_T)
+    // so that (n p) = n_i(x)^2 in equilibrium (Eg drops back in via
+    // delta_p - delta_n).  In the homogeneous-reference limit all four
+    // buffers degenerate to the uniform values and the existing
+    // homogeneous solver behaviour is bit-identical.
+    std::vector<float> m_ni_local;
+    std::vector<float> m_eps_r_local;
+    std::vector<float> m_delta_n;
+    std::vector<float> m_delta_p;
+
+    // Wachutka heat solver state.  m_T_old buffers the previous-call
+    // value for diagnostics & potential Backward-Euler upgrades; m_H_gen
+    // exposes H(x,y) [W/cm^3] to the UI for visualisation.
+    std::vector<float> m_T_old;
+    std::vector<float> m_H_gen;
+    float              m_dT_max_last = 0.0f;
+
+    // Internal: refresh the per-cell heterojunction caches (n_i, eps_r,
+    // chi-shifts) using the current m_T grid and m_mat ids. Called by
+    // every public solver entry point so the hot path always reads from
+    // a coherent cache. Cheap: O(W*H), one expm1/pow per cell.
+    void refreshLocalParamCache(double V_T) noexcept;
 
     // Internal: refresh m_phi_n / m_phi_p from m_n_dens / m_p_dens / m_psi.
     // Called once per Gummel iteration so the BandView quasi-Fermi cuts

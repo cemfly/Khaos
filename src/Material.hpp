@@ -140,6 +140,30 @@ struct Profile {
     //   Si:   11.7    GaAs: 12.9    Ge: 16.0    (Sze Tab. 1.1)
     double epsilon_r;    // [-] static relative permittivity
 
+    // ---- Electron affinity (Anderson rule, heterojunctions)  [Phase 5] --
+    //
+    //   chi  = energy required to lift a conduction-band electron to the
+    //          vacuum level [eV].  Together with E_g it pins the band
+    //          edges in an absolute reference frame:
+    //
+    //              E_c(x) = E_vac(x) - chi(x)  =  -q psi(x) - chi(x)
+    //              E_v(x) = E_c(x) - E_g(x)
+    //
+    //   At an A/B heterojunction the band edges step by:
+    //
+    //              Delta E_c =  chi_A - chi_B
+    //              Delta E_v = (chi_B - chi_A) + (E_g,B - E_g,A)
+    //                        = -Delta E_c + Delta E_g
+    //
+    //   Tabulated (300 K, Sze Sec. 1.5 / Pierret App. F):
+    //     Si   :  chi = 4.05 eV    Ge   :  chi = 4.00 eV
+    //     GaAs :  chi = 4.07 eV
+    //
+    //   With these three numbers the engine reproduces the textbook
+    //   Si/Ge type-II offset (Delta E_v ~ 0.42 eV, Delta E_c ~ 0.05 eV)
+    //   and the Si/GaAs broken-gap alignment.
+    double chi;          // [eV] electron affinity
+
     // ---- Auger recombination ---------------------------------------------
     //
     //   R_Aug = (C_n n + C_p p) (n p - n_i^2)
@@ -254,6 +278,7 @@ concept SemiconductorProfile = requires(const T& t) {
     { t.v_sat_n          } -> std::convertible_to<double>;
     { t.tau_n            } -> std::convertible_to<double>;
     { t.epsilon_r        } -> std::convertible_to<double>;
+    { t.chi              } -> std::convertible_to<double>;
     { t.C_n_aug          } -> std::convertible_to<double>;
     { t.alpha_inf_n      } -> std::convertible_to<double>;
     { t.E_crit_n         } -> std::convertible_to<double>;
