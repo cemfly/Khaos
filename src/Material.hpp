@@ -186,6 +186,25 @@ struct Profile {
     double C_n_aug;      // [cm^6/s] electron Auger coefficient
     double C_p_aug;      // [cm^6/s] hole     Auger coefficient
 
+    // ---- Radiative (band-to-band) recombination --------------------------
+    //
+    //   R_rad = B_rad * (n p - n_i^2)
+    //
+    // Photon-emitting interband recombination. Negligible for indirect-gap
+    // hosts (Si, Ge) where momentum conservation requires a phonon, but
+    // the *dominant* low-injection mechanism in direct-gap GaAs and the
+    // physical basis of LEDs and laser diodes.
+    //
+    // Tabulated B (300 K):
+    //   Si   : 1.1e-14 cm^3/s   (indirect; very small)
+    //   GaAs : 7.2e-10 cm^3/s   (direct; ~5 orders larger than Si)
+    //   Ge   : 6.4e-14 cm^3/s
+    //
+    // References: Sze "Physics of Semiconductor Devices" Tab. 1.4 /
+    //             Pankove "Optical Processes in Semiconductors" Ch. 6 /
+    //             Schubert "Light-Emitting Diodes" Eq. 2.13.
+    double B_rad;        // [cm^3/s] radiative recombination coefficient
+
     // ---- Impact ionization (Chynoweth) -----------------------------------
     //
     //   alpha(E) = alpha_inf * exp(-(E_crit / E)^m)        (Chynoweth, 1958)
@@ -280,6 +299,7 @@ concept SemiconductorProfile = requires(const T& t) {
     { t.epsilon_r        } -> std::convertible_to<double>;
     { t.chi              } -> std::convertible_to<double>;
     { t.C_n_aug          } -> std::convertible_to<double>;
+    { t.B_rad            } -> std::convertible_to<double>;
     { t.alpha_inf_n      } -> std::convertible_to<double>;
     { t.E_crit_n         } -> std::convertible_to<double>;
     { t.A_kane           } -> std::convertible_to<double>;

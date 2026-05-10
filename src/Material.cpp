@@ -64,6 +64,9 @@ const Profile Silicon{
     .C_n_aug           = 2.8e-31,
     .C_p_aug           = 9.9e-32,
 
+    // Radiative -- indirect gap, phonon-assisted (Sze Tab. 1.4)
+    .B_rad             = 1.1e-14,
+
     // Chynoweth (Van Overstraeten - de Man 1970, simplified m=1)
     .alpha_inf_n       = 7.030e5,
     .alpha_inf_p       = 1.582e6,
@@ -141,6 +144,10 @@ const Profile GalliumArsenide{
     .C_n_aug           = 1.0e-30,
     .C_p_aug           = 1.0e-30,
 
+    // Radiative -- DIRECT gap; the LED/laser-diode mechanism. ~5 orders
+    // of magnitude larger than Si. (Sze Tab. 1.4; Schubert Eq. 2.13.)
+    .B_rad             = 7.2e-10,
+
     // Chynoweth (GaAs, Bulman/Williams 1985)
     .alpha_inf_n       = 1.899e5,
     .alpha_inf_p       = 2.215e5,
@@ -207,6 +214,9 @@ const Profile Germanium{
     // Auger (Conradt & Aengenheister 1972)
     .C_n_aug           = 8.0e-32,
     .C_p_aug           = 2.8e-31,
+
+    // Radiative -- narrow indirect gap (Sze Tab. 1.4)
+    .B_rad             = 6.4e-14,
 
     // Chynoweth (Mikawa et al 1980; Sze Tab. 2.1.5)
     .alpha_inf_n       = 1.55e7,

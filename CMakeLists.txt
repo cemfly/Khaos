@@ -178,6 +178,26 @@ target_link_libraries(implot PUBLIC ImGui-SFML::ImGui-SFML)
 
 
 # =============================================================================
+# 4b) nlohmann/json -- versioned preset save/load (Phase 6 delivery)
+# -----------------------------------------------------------------------------
+# Header-only.  We pin to a release tag and disable its tests/examples so
+# the configure step stays cheap. Used by src/Preset.cpp to serialise the
+# painter doping map, material grid, V_a, AC settings, and the latest
+# psi / n / p / T snapshots into a self-contained .khaos.json file.
+# =============================================================================
+set(JSON_BuildTests       OFF CACHE INTERNAL "")
+set(JSON_Install          OFF CACHE INTERNAL "")
+FetchContent_Declare(
+    nlohmann_json
+    GIT_REPOSITORY https://github.com/nlohmann/json.git
+    GIT_TAG        v3.11.3
+    GIT_SHALLOW    TRUE
+    GIT_PROGRESS   TRUE
+)
+FetchContent_MakeAvailable(nlohmann_json)
+
+
+# =============================================================================
 # 5) Physics core (object library reused by both app and tests)
 # =============================================================================
 add_library(semicon_physics OBJECT
@@ -200,6 +220,7 @@ add_executable(${PROJECT_NAME}
     src/DriftDiffusion.cpp
     src/CrystalView.cpp
     src/BandView.cpp
+    src/Preset.cpp
     $<TARGET_OBJECTS:semicon_physics>
 )
 target_include_directories(${PROJECT_NAME} PRIVATE src)
@@ -209,6 +230,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     SFML::System
     ImGui-SFML::ImGui-SFML
     implot
+    nlohmann_json::nlohmann_json
 )
 
 # Copy the assets folder next to the binary (font, colormap, etc.).
@@ -288,6 +310,7 @@ if(BUILD_TESTS)
     enable_testing()
     add_executable(physics_tests
         tests/test_physics.cpp
+        src/DriftDiffusion.cpp     # PN junction integration test
         $<TARGET_OBJECTS:semicon_physics>
     )
     target_include_directories(physics_tests PRIVATE src)

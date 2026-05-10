@@ -525,3 +525,313 @@ TEST(FermiLevel, TrackingDoping) {
     pe.setDopingConcentration(1.0e17);
     EXPECT_LT(pe.getFermiLevel(), 0.5 * pe.getBandgap());
 }
+
+
+// =============================================================================
+// Scharfetter-Gummel Bernoulli function  (Phase 4)
+// -----------------------------------------------------------------------------
+//   B(x) = x / (exp(x) - 1).
+//   Identity in equilibrium drift-diffusion: B(0) = 1, B(x) - B(-x) = -x.
+//   Asymptotics: B(x)  -> 0   as x -> +inf
+//                B(x)  -> -x  as x -> -inf
+// =============================================================================
+TEST(Bernoulli, IdentityAtZero) {
+    EXPECT_NEAR(PhysicsEngine::bernoulli(0.0), 1.0, 1.0e-12);
+}
+
+TEST(Bernoulli, IdentityTinyArgs) {
+    // Taylor branch (|x| < 1e-6)
+    for (double x : {-1e-8, -1e-10, 1e-12, 1e-7}) {
+        const double b = PhysicsEngine::bernoulli(x);
+        EXPECT_NEAR(b, 1.0 - 0.5 * x, 1.0e-9);
+    }
+}
+
+TEST(Bernoulli, AntisymmetryIdentity) {
+    // For all x != 0:  B(x) - B(-x) = -x   (SG drift-diffusion identity)
+    for (double x : {-3.0, -1.0, -0.1, 0.1, 1.0, 3.0, 12.0}) {
+        const double lhs = PhysicsEngine::bernoulli( x)
+                         - PhysicsEngine::bernoulli(-x);
+        EXPECT_NEAR(lhs, -x, 1.0e-9) << "x = " << x;
+    }
+}
+
+TEST(Bernoulli, OverflowBranchStableAtX50) {
+    // x = 50 -> exp(50) ~ 5.18e21; naive (exp(x) - 1) overflows in
+    // single-precision but we're in double-precision land. Still: the
+    // |x|>40 branch uses asymptotic x*exp(-x) which is finite & small.
+    const double b = PhysicsEngine::bernoulli(50.0);
+    EXPECT_TRUE(std::isfinite(b));
+    EXPECT_GT(b, 0.0);
+    EXPECT_LT(b, 1.0e-18);
+}
+
+TEST(Bernoulli, UnderflowBranchAtXMinus50) {
+    // x = -50: exp(x) ~ 0, denominator ~ -1, so B(x) ~ -x = 50.
+    const double b = PhysicsEngine::bernoulli(-50.0);
+    EXPECT_NEAR(b, 50.0, 1.0e-9);
+}
+
+
+// =============================================================================
+// Recombination triplet  (Phase 2-4)
+// -----------------------------------------------------------------------------
+// Detailed-balance: every mechanism's rate must vanish when n p = n_i^2.
+// Three-particle Auger > SRH at heavy doping; radiative dominates in
+// direct-gap GaAs at moderate forward injection.
+// Sze 1.5.6 / Pankove Ch. 6.
+// =============================================================================
+TEST(Recombination, AugerZeroAtEquilibrium) {
+    const double n_i = 1.0e10;
+    const double R = PhysicsEngine::recombAuger(n_i, n_i, n_i,
+                                                2.8e-31, 9.9e-32);
+    EXPECT_NEAR(R, 0.0, 1.0e-6);
+}
+
+TEST(Recombination, RadiativeZeroAtEquilibrium) {
+    const double n_i = 1.0e10;
+    const double R = PhysicsEngine::recombRadiative(n_i, n_i, n_i, 1.1e-14);
+    EXPECT_NEAR(R, 0.0, 1.0e-6);
+}
+
+TEST(Recombination, RadiativeZeroWhenCoefficientIsZero) {
+    EXPECT_DOUBLE_EQ(
+        PhysicsEngine::recombRadiative(1.0e18, 1.0e18, 1.0e10, 0.0), 0.0);
+}
+
+TEST(Recombination, NetIsSumOfThree) {
+    // Net = SRH + Auger + Radiative -- verify the aggregator agrees
+    // with explicit summation, using the GaAs profile (largest B_rad
+    // so radiative contribution is non-trivial).
+    const auto& mat = material::byKind(material::Kind::GaAs);
+    const double n_i = 2.0e6, n = 1.0e16, p = 1.0e16;
+    const double R_srh = PhysicsEngine::recombSRH(n, p, n_i,
+                                                  mat.tau_n, mat.tau_p);
+    const double R_aug = PhysicsEngine::recombAuger(n, p, n_i,
+                                                    mat.C_n_aug, mat.C_p_aug);
+    const double R_rad = PhysicsEngine::recombRadiative(n, p, n_i, mat.B_rad);
+    const double U     = PhysicsEngine::netRecombination(n, p, n_i, mat);
+    EXPECT_NEAR(U, R_srh + R_aug + R_rad,
+                std::max(1.0e-6, 1.0e-9 * std::abs(U)));
+}
+
+TEST(Recombination, GaAsRadiativeMuchLargerThanSi) {
+    // Physical signature of direct vs indirect gap: with the same n,p,
+    // GaAs R_rad >> Si R_rad by ~5 orders.
+    const double n = 1.0e17, p = 1.0e17, n_i = 1.0e10;
+    const double R_Si   = PhysicsEngine::recombRadiative(
+        n, p, n_i, material::Silicon.B_rad);
+    const double R_GaAs = PhysicsEngine::recombRadiative(
+        n, p, 2.0e6, material::GalliumArsenide.B_rad);
+    EXPECT_GT(R_GaAs / R_Si, 1.0e3);
+}
+
+
+// =============================================================================
+// Impact ionisation (Chynoweth) + band-to-band tunnelling (Kane)  (Phase 2)
+// -----------------------------------------------------------------------------
+// alpha(E) -> 0 at E = 0, monotonically increasing in |E|.
+// G_BTBT  -> 0 at E = 0, also monotonic. Both must be finite and >= 0.
+// =============================================================================
+TEST(Chynoweth, ZeroAtZeroField) {
+    const double a = PhysicsEngine::chynowethRate(
+        0.0, 7.03e5, 1.231e6, 1.0);
+    EXPECT_DOUBLE_EQ(a, 0.0);
+}
+
+TEST(Chynoweth, MonotonicInField) {
+    const double a1 = PhysicsEngine::chynowethRate(
+        1.0e5, 7.03e5, 1.231e6, 1.0);
+    const double a2 = PhysicsEngine::chynowethRate(
+        5.0e5, 7.03e5, 1.231e6, 1.0);
+    const double a3 = PhysicsEngine::chynowethRate(
+        2.0e6, 7.03e5, 1.231e6, 1.0);
+    EXPECT_LT(a1, a2);
+    EXPECT_LT(a2, a3);
+}
+
+TEST(Chynoweth, NonNegativeAcrossRange) {
+    for (double E = 0.0; E < 1.0e7; E += 5.0e5) {
+        EXPECT_GE(PhysicsEngine::chynowethRate(
+            E, 7.03e5, 1.231e6, 1.0), 0.0);
+    }
+}
+
+TEST(KaneBTBT, ZeroAtZeroField) {
+    EXPECT_DOUBLE_EQ(
+        PhysicsEngine::kaneBTBT(0.0, 3.5e21, 2.25e7, false), 0.0);
+}
+
+TEST(KaneBTBT, IndirectVsDirectAtHighField) {
+    // Direct (P=2) and indirect (P=5/2) both monotonic; for the same
+    // A,B the indirect form has the extra sqrt(E) factor.
+    const double E = 1.5e6;
+    const double Gd = PhysicsEngine::kaneBTBT(E, 1.0e21, 2.0e7, true);
+    const double Gi = PhysicsEngine::kaneBTBT(E, 1.0e21, 2.0e7, false);
+    EXPECT_GT(Gi, Gd);  // sqrt(E) > 1 for E > 1
+}
+
+TEST(KaneBTBT, MonotonicInField) {
+    using P = PhysicsEngine;
+    EXPECT_LT(P::kaneBTBT(1.0e6, 3.5e21, 2.25e7, false),
+              P::kaneBTBT(2.0e6, 3.5e21, 2.25e7, false));
+    EXPECT_LT(P::kaneBTBT(2.0e6, 3.5e21, 2.25e7, false),
+              P::kaneBTBT(5.0e6, 3.5e21, 2.25e7, false));
+}
+
+
+// =============================================================================
+// Poisson / electrostatics helpers  (Phase 1, 3)
+// -----------------------------------------------------------------------------
+//   V_T = k_B T (eV/K * K -> V via numerical equivalence)
+//   V_bi = V_T ln(Nd Na / n_i^2)        (Sze Eq. 2.10)
+// =============================================================================
+TEST(Electrostatics, ThermalVoltageAt300K) {
+    const double V_T = PhysicsEngine::thermalVoltage(300.0);
+    EXPECT_NEAR(V_T, 0.02585, 1.0e-4);
+}
+
+TEST(Electrostatics, BuiltInPotentialFormula) {
+    const double V_T  = PhysicsEngine::thermalVoltage(300.0);
+    const double n_i  = 1.0e10;
+    const double Nd   = 1.0e17;
+    const double Na   = 1.0e17;
+    const double Vbi  = PhysicsEngine::builtInPotential(Nd, Na, n_i, V_T);
+    // V_bi = V_T ln(Nd Na / n_i^2)
+    const double expected = V_T * std::log((Nd * Na) / (n_i * n_i));
+    EXPECT_NEAR(Vbi, expected, 1.0e-9);
+}
+
+TEST(Electrostatics, BuiltInPotentialZeroAtIntrinsic) {
+    // Nd = Na = n_i -> V_bi = 0
+    const double V_T = PhysicsEngine::thermalVoltage(300.0);
+    EXPECT_NEAR(PhysicsEngine::builtInPotential(1.0e10, 1.0e10, 1.0e10, V_T),
+                0.0, 1.0e-9);
+}
+
+TEST(Electrostatics, EquilibriumDensityAgreesAtZeroPsi) {
+    // psi=0, phi=0 -> n = n_i
+    const double V_T = PhysicsEngine::thermalVoltage(300.0);
+    EXPECT_NEAR(
+        PhysicsEngine::equilibriumElectronDensity(1.0e10, 0.0, V_T),
+        1.0e10, 1.0e-6);
+    EXPECT_NEAR(
+        PhysicsEngine::equilibriumHoleDensity(1.0e10, 0.0, V_T),
+        1.0e10, 1.0e-6);
+}
+
+TEST(Electrostatics, OhmicContactPsiAsymmetry) {
+    // n-contact psi positive; p-contact psi negative (Sze Eq. 2.7).
+    const double V_T = PhysicsEngine::thermalVoltage(300.0);
+    const double n_i = 1.0e10;
+    const double psi_n = PhysicsEngine::ohmicContactPsi(
+        0.0, /*Nd*/1.0e17, /*Na*/1.0, n_i, V_T);
+    const double psi_p = PhysicsEngine::ohmicContactPsi(
+        0.0, /*Nd*/1.0, /*Na*/1.0e17, n_i, V_T);
+    EXPECT_GT(psi_n,  0.0);
+    EXPECT_LT(psi_p,  0.0);
+    // Magnitudes match (same N): symmetric junction
+    EXPECT_NEAR(psi_n, -psi_p, 1.0e-9);
+}
+
+
+// =============================================================================
+// Capacitance helpers (Phase 4)
+// =============================================================================
+TEST(Capacitance, DepletionWidthShrinksUnderForwardBias) {
+    using P = PhysicsEngine;
+    const double V_bi = 0.7, eps_r = 11.7;
+    const double W_eq = P::depletionWidthFlat(
+        1.0e17, 1.0e17, V_bi, 0.0, eps_r);
+    const double W_fwd = P::depletionWidthFlat(
+        1.0e17, 1.0e17, V_bi, 0.4, eps_r);
+    const double W_rev = P::depletionWidthFlat(
+        1.0e17, 1.0e17, V_bi, -2.0, eps_r);
+    EXPECT_LT(W_fwd, W_eq);
+    EXPECT_GT(W_rev, W_eq);
+}
+
+TEST(Capacitance, DepletionCapacitanceScalesInverselyWithW) {
+    using P = PhysicsEngine;
+    // C = eps_s A / W -- doubling W halves C
+    const double Cz = P::depletionCapacitanceFlat(
+        1.0e17, 1.0e17, 0.7, 0.0, 11.7, 1.0);
+    const double Cr = P::depletionCapacitanceFlat(
+        1.0e17, 1.0e17, 0.7, -3.0, 11.7, 1.0);
+    EXPECT_LT(Cr, Cz);
+}
+
+TEST(Capacitance, DiffusionCapacitanceProportionalToCurrent) {
+    using P = PhysicsEngine;
+    const double V_T = P::thermalVoltage(300.0);
+    const double Cd1 = P::diffusionCapacitance(1.0e-3, 1.0e-7, V_T);
+    const double Cd2 = P::diffusionCapacitance(2.0e-3, 1.0e-7, V_T);
+    EXPECT_NEAR(Cd2 / Cd1, 2.0, 1.0e-6);
+}
+
+
+// =============================================================================
+// Local mobility (Phase 4)  -- mu(N, E) recovers low-field limits
+// =============================================================================
+TEST(LocalMobility, ZeroFieldEqualsMatthiessenLowField) {
+    const auto& mat = material::byKind(material::Kind::Silicon);
+    const double T = 300.0, N = 1.0e16;
+    const double mu_low = PhysicsEngine::matthiessenMobilityElectron(
+        mat, T, N);
+    const double mu_E0  = PhysicsEngine::localMobilityElectron(
+        mat, T, N, 0.0);
+    EXPECT_NEAR(mu_E0, mu_low, 1.0e-6 * mu_low);
+}
+
+TEST(LocalMobility, HighFieldSaturatesVelocity) {
+    // v = mu_eff * E should plateau near v_sat at very high field.
+    const auto& mat = material::byKind(material::Kind::Silicon);
+    const double T = 300.0, N = 1.0e16;
+    const double E = 5.0e5;   // 500 kV/cm -- deep in saturation
+    const double mu_eff = PhysicsEngine::localMobilityElectron(mat, T, N, E);
+    const double v      = mu_eff * E;
+    EXPECT_LT(v, 1.3 * mat.v_sat_n);
+}
+
+
+// =============================================================================
+// PN diode benchmark -- equilibrium V_bi from a painted junction
+// -----------------------------------------------------------------------------
+// Programmatic painter test: stamp Nd / Na on a DriftDiffusion grid, run
+// equilibrium Poisson, and check that the psi step matches the textbook
+// built-in potential within 5%.  Sze Sec. 2.2.
+// =============================================================================
+#include "DriftDiffusion.hpp"
+TEST(PNJunction, EquilibriumVbiMatchesTextbook) {
+    PhysicsEngine pe(material::Kind::Silicon);
+    pe.setTemperature(300.0);
+    pe.setDopingType(DopingType::Intrinsic);   // grid-defined doping
+    DriftDiffusion dd(60, 16);
+    dd.configureForMaterial(pe.getMaterial());
+    dd.setCellPitchCm(1.0e-5f);    // 100 nm pitch -> 6 um device
+
+    const double Nd = 1.0e17, Na = 1.0e17;
+    for (int j = 0; j < dd.height(); ++j) {
+        for (int i = 0; i < dd.width(); ++i) {
+            if (i < dd.width() / 2) dd.setDopingAt(i, j, 0.0, Na);
+            else                    dd.setDopingAt(i, j, Nd,  0.0);
+        }
+    }
+    dd.setDeviceMode(DeviceMode::Painter);
+
+    // Plenty of sweeps for tight equilibrium convergence.
+    const double n_i = pe.getIntrinsicCarrier();
+    const double V_T = PhysicsEngine::thermalVoltage(300.0);
+    dd.solvePoisson(n_i, V_T, pe.getMaterial().epsilon_r, 5000, 0.85);
+
+    // Measure psi step: right column (n-side) minus left column (p-side).
+    const double psi_n = dd.psiAt(dd.width() - 2, dd.height() / 2);
+    const double psi_p = dd.psiAt(1,              dd.height() / 2);
+    const double psi_step = psi_n - psi_p;
+
+    const double V_bi_textbook =
+        PhysicsEngine::builtInPotential(Nd, Na, n_i, V_T);
+    // Within 5% -- depletion-approximation tail at the contacts plus
+    // discretisation; closer convergence comes from a finer mesh.
+    EXPECT_NEAR(psi_step, V_bi_textbook, 0.05 * V_bi_textbook);
+}

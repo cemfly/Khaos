@@ -802,6 +802,40 @@ double PhysicsEngine::recombAuger(
 
 
 // =============================================================================
+// Radiative recombination
+// -----------------------------------------------------------------------------
+// R_rad = B_rad * (n p - n_i^2).  Quadratic in injection; equilibrium-zero
+// by detailed balance.  Dominant in direct-gap materials (GaAs, InP, ...).
+// Sze Sec. 1.5.6 / Pankove Ch. 6 / Schubert Eq. 2.13.
+// =============================================================================
+double PhysicsEngine::recombRadiative(
+    double n, double p, double n_i, double B_rad) noexcept
+{
+    if (B_rad <= 0.0) return 0.0;
+    return B_rad * (n * p - n_i * n_i);
+}
+
+
+// =============================================================================
+// Net recombination aggregator
+// -----------------------------------------------------------------------------
+// Sums SRH, Auger, and radiative -- the three (n,p)-only loss channels.
+// Field-driven generation (Kane BTBT, Chynoweth impact ionisation) is NOT
+// included here because those need grad psi; they live in the continuity
+// solver where the local field is in scope.
+// =============================================================================
+double PhysicsEngine::netRecombination(
+    double n, double p, double n_i,
+    const material::Profile& mat) noexcept
+{
+    const double R_srh = recombSRH      (n, p, n_i, mat.tau_n, mat.tau_p);
+    const double R_aug = recombAuger    (n, p, n_i, mat.C_n_aug, mat.C_p_aug);
+    const double R_rad = recombRadiative(n, p, n_i, mat.B_rad);
+    return R_srh + R_aug + R_rad;
+}
+
+
+// =============================================================================
 // Chynoweth impact ionization
 // -----------------------------------------------------------------------------
 // alpha(E) = alpha_inf * exp[-(E_crit / |E|)^m]   [cm^-1]

@@ -123,6 +123,11 @@ public:
     [[nodiscard]] double netDopingAt(int i, int j) const noexcept;
     [[nodiscard]] double donorAt    (int i, int j) const noexcept;
     [[nodiscard]] double acceptorAt (int i, int j) const noexcept;
+
+    // Bulk-load setter -- writes Nd/Na directly and re-tags the region
+    // by majority dopant. Used by Preset::load to restore a painted
+    // device map without going through the additive brush API.
+    void setDopingAt(int i, int j, double Nd, double Na) noexcept;
     void setCellPitchCm(float h) noexcept;
     [[nodiscard]] float cellPitchCm() const noexcept { return m_cell_pitch_cm; }
 

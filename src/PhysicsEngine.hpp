@@ -352,6 +352,41 @@ public:
         double C_n, double C_p) noexcept;
 
     // -------------------------------------------------------------------
+    // Radiative (band-to-band) recombination
+    //
+    //   R_rad = B_rad (n p - n_i^2)            [cm^-3 / s]
+    //
+    // Photon-emitting interband recombination. (n p - n_i^2) goes to
+    // zero in equilibrium (detailed balance) and grows quadratically in
+    // injection. Dominates in direct-gap materials (GaAs, InP, ...)
+    // where momentum is conserved without a phonon assist.
+    //
+    // Reference: Sze "Physics of Semiconductor Devices" Sec. 1.5.6;
+    //            Pankove "Optical Processes" Ch. 6;
+    //            Schubert "Light-Emitting Diodes" Eq. 2.13.
+    // -------------------------------------------------------------------
+    [[nodiscard]] static double recombRadiative(
+        double n, double p, double n_i, double B_rad) noexcept;
+
+    // -------------------------------------------------------------------
+    // Net recombination aggregator
+    //
+    //   U_net = R_SRH + R_Aug + R_rad        [cm^-3 / s]
+    //
+    // Convenience: returns the *total* loss rate to inject into the
+    // continuity equation's (R - G) source term, with the per-material
+    // coefficients pulled from the Profile. The Kane / impact-ionisation
+    // *generation* terms (which depend on the local field, not just
+    // n, p) stay in the continuity solver where they have access to
+    // grad psi.
+    //
+    // Useful for a per-cell readout that distinguishes loss mechanisms.
+    // -------------------------------------------------------------------
+    [[nodiscard]] static double netRecombination(
+        double n, double p, double n_i,
+        const material::Profile& mat) noexcept;
+
+    // -------------------------------------------------------------------
     // Chynoweth impact ionization        (Sze Sec. 2.4.2)
     //
     //   alpha(E) = alpha_inf * exp[-(E_crit / |E|)^m]    [cm^-1]

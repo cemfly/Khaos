@@ -493,6 +493,21 @@ void DriftDiffusion::setCellPitchCm(float h) noexcept {
     m_cell_pitch_cm = std::clamp(h, 1.0e-7f, 1.0e-2f);
 }
 
+void DriftDiffusion::setDopingAt(int i, int j, double Nd, double Na) noexcept {
+    if (i < 0 || j < 0 || i >= m_W || j >= m_H) return;
+    const std::size_t k = idx(i, j);
+    m_Nd[k] = static_cast<float>(std::max(0.0, Nd));
+    m_Na[k] = static_cast<float>(std::max(0.0, Na));
+    // Region tag follows majority dopant; both-zero -> bulk.
+    if      (Nd > Na && Nd > 0.0)
+        m_region[k] = static_cast<std::uint8_t>(CellRegion::NDoped);
+    else if (Na > Nd && Na > 0.0)
+        m_region[k] = static_cast<std::uint8_t>(CellRegion::PDoped);
+    else
+        m_region[k] = static_cast<std::uint8_t>(CellRegion::Bulk);
+    m_contacts_dirty = true;
+}
+
 
 // =============================================================================
 // Heterojunction painter [Phase 5]
@@ -1244,19 +1259,20 @@ void DriftDiffusion::solveContinuityElectron(
                 const double diag  = mu_E * bnE + mu_W * bW
                                    + mu_N * bnN + mu_S * bS;
 
-                // Source: R_SRH + R_Aug - G_BTBT  [cm^-3 / s].
-                // Local n_i (depends on local Eg + local lattice T).
+                // Source:  U_net (= R_SRH + R_Aug + R_rad)  -  G_BTBT.
+                // Local n_i depends on local Eg + lattice T (already
+                // baked into m_ni_local). Radiative coefficient B_rad
+                // varies by material (5 orders Si vs GaAs) -- read off
+                // mat_C so per-cell heterostructures stay accurate.
                 const double n_C = m_n_dens[k];
                 const double p_C = m_p_dens[k];
                 const double n_i_C = static_cast<double>(m_ni_local[k]);
-                const double R_srh = PE::recombSRH(
-                    n_C, p_C, n_i_C, mat_C.tau_n, mat_C.tau_p);
-                const double R_aug = PE::recombAuger(
-                    n_C, p_C, n_i_C, mat_C.C_n_aug, mat_C.C_p_aug);
+                const double U     = PE::netRecombination(
+                    n_C, p_C, n_i_C, mat_C);
                 const double Em    = electricFieldMagAt(i, j);
                 const double G_bt  = PE::kaneBTBT(
                     Em, mat_C.A_kane, mat_C.B_kane, mat_C.btbt_isDirect);
-                const double RmG   = R_srh + R_aug - G_bt;
+                const double RmG   = U - G_bt;
                 (void)mat; (void)T_lattice;
 
                 // n_C^new = [alpha n_old_C + sum off n_k - h^2 (R-G)/V_T]
@@ -1386,14 +1402,12 @@ void DriftDiffusion::solveContinuityHole(
                 const double n_C = m_n_dens[k];
                 const double p_C = m_p_dens[k];
                 const double n_i_C = static_cast<double>(m_ni_local[k]);
-                const double R_srh = PE::recombSRH(
-                    n_C, p_C, n_i_C, mat_C.tau_n, mat_C.tau_p);
-                const double R_aug = PE::recombAuger(
-                    n_C, p_C, n_i_C, mat_C.C_n_aug, mat_C.C_p_aug);
+                const double U     = PE::netRecombination(
+                    n_C, p_C, n_i_C, mat_C);
                 const double Em    = electricFieldMagAt(i, j);
                 const double G_bt  = PE::kaneBTBT(
                     Em, mat_C.A_kane, mat_C.B_kane, mat_C.btbt_isDirect);
-                const double RmG   = R_srh + R_aug - G_bt;
+                const double RmG   = U - G_bt;
                 (void)mat; (void)T_lattice;
 
                 // p continuity: dp/dt = -div(J_p)/q + (G - R)
@@ -1684,18 +1698,23 @@ float DriftDiffusion::solveHeatEquation(
             const double sigma_C = q * (n_C * mu_n_C + p_C * mu_p_C);
             const double H_J     = sigma_C * E_mag * E_mag;       // W/cm^3
 
-            // Recombination: H_R = (R - G) * (E_g + 3 kT) * q
+            // Recombination: H_R = (U_net - G_BTBT) * (E_g + 3 kT) * q
             //   units: (cm^-3 s^-1) * eV * J/eV = J / (cm^3 s) = W/cm^3
+            //
+            // U_net includes radiative now. In a regular diode/BJT the
+            // emitted photons are reabsorbed locally (high-index Si traps
+            // ~96% of internal light), so they show up as Joule-like
+            // lattice heat. For an LED with engineered photon extraction
+            // the radiative term should NOT be heat-coupled -- a future
+            // PhotonTransport pass can subtract eta_ext * R_rad from H_R.
             const double n_i_C = static_cast<double>(m_ni_local[k]);
-            const double R_srh = PhysicsEngine::recombSRH(
-                n_C, p_C, n_i_C, mat_C.tau_n, mat_C.tau_p);
-            const double R_aug = PhysicsEngine::recombAuger(
-                n_C, p_C, n_i_C, mat_C.C_n_aug, mat_C.C_p_aug);
+            const double U     = PhysicsEngine::netRecombination(
+                n_C, p_C, n_i_C, mat_C);
             const double G_bt  = PhysicsEngine::kaneBTBT(
                 E_mag, mat_C.A_kane, mat_C.B_kane, mat_C.btbt_isDirect);
             const double Eg_C  = PhysicsEngine::bandgapAt(mat_C, T_C);   // eV
             const double E_th  = 3.0 * kB * T_C;                          // eV
-            const double H_R   = (R_srh + R_aug - G_bt) * (Eg_C + E_th) * q;
+            const double H_R   = (U - G_bt) * (Eg_C + E_th) * q;
 
             m_H_gen[k] = static_cast<float>(H_J + H_R);
         }

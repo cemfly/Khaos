@@ -50,6 +50,7 @@
 #include "Material.hpp"
 #include "Palette.hpp"
 #include "PhysicsEngine.hpp"
+#include "Preset.hpp"
 
 
 // =============================================================================
@@ -444,6 +445,29 @@ void drawMenuBar(bool& running, UIState& ui, PhysicsEngine& physics,
                     ui.flashStatus("Saved row to export_data.csv");
                 else
                     ui.flashStatus("Failed to write export_data.csv");
+            }
+            ImGui::Separator();
+            // ---- Preset save / load (Phase 6 JSON delivery) ---------------
+            if (ImGui::MenuItem("Save preset...", "Ctrl+S")) {
+                const auto r = preset::save(
+                    "khaos_preset.json", physics, dd);
+                ui.flashStatus(r
+                    ? "Saved -> khaos_preset.json"
+                    : std::string("Save failed: ") + preset::toString(r.error()));
+            }
+            if (ImGui::MenuItem("Load preset...", "Ctrl+O")) {
+                const auto r = preset::load(
+                    "khaos_preset.json", physics, dd);
+                if (r) {
+                    dd.configureForMaterial(physics.getMaterial());
+                    ui.V_bias = dd.appliedBias();
+                    ui.V_BE   = dd.vBE();
+                    ui.V_CE   = dd.vCE();
+                    ui.flashStatus(*r);
+                } else {
+                    ui.flashStatus(std::string("Load failed: ")
+                                   + preset::toString(r.error()));
+                }
             }
             ImGui::Separator();
             if (ImGui::MenuItem("Exit", "Esc")) running = false;
@@ -1713,24 +1737,48 @@ void drawBreakdownWindow(const PhysicsEngine& physics,
     const double p   = physics.getTotalHoleConc();
     const double n_i = physics.getIntrinsicCarrier();
 
-    // ---- Auger (depends only on n, p, n_i, C_n, C_p) -------------------
-    ImGui::SeparatorText("Auger Recombination");
+    // ---- Recombination triplet (SRH + Auger + Radiative) ----------------
+    ImGui::SeparatorText("Recombination (U_net = R_SRH + R_Aug + R_rad)");
     HelpMarker(
-        "R_Aug = (C_n n + C_p p)(np - n_i^2). Three-particle process; "
-        "dominates SRH for N > ~1e18. Sze 1.5.6 / Pierret 5.2.4.");
-    const double R_aug = PhysicsEngine::recombAuger(n, p, n_i,
-                                                    m.C_n_aug, m.C_p_aug);
+        "Three (n,p)-only loss channels compete:\n"
+        "  R_SRH = (np - n_i^2) / [tau_p(n+n_i) + tau_n(p+n_i)] -- midgap traps\n"
+        "  R_Aug = (C_n n + C_p p)(np - n_i^2)                 -- 3-particle\n"
+        "  R_rad = B_rad (np - n_i^2)                           -- photon emission\n"
+        "Field-driven Kane/Chynoweth generation is reported below.\n"
+        "Sze 1.5.6 / Pankove Ch. 6 / Schubert 2.13.");
+
     const double R_srh = PhysicsEngine::recombSRH(n, p, n_i,
                                                   m.tau_n, m.tau_p);
-    ImGui::Text("C_n = %.2e   C_p = %.2e cm^6/s", m.C_n_aug, m.C_p_aug);
-    ImGui::Text("R_Aug   = %.3e cm^-3 / s",  R_aug);
-    ImGui::Text("R_SRH   = %.3e cm^-3 / s",  R_srh);
-    if (R_srh != 0.0) {
-        ImGui::Text("R_Aug / R_SRH = %.3f", R_aug / R_srh);
-        if (R_aug > R_srh) {
-            ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.30f, 1.0f),
-                "Auger-dominated regime (heavy doping or high injection).");
-        }
+    const double R_aug = PhysicsEngine::recombAuger(n, p, n_i,
+                                                    m.C_n_aug, m.C_p_aug);
+    const double R_rad = PhysicsEngine::recombRadiative(n, p, n_i, m.B_rad);
+    const double U_net = R_srh + R_aug + R_rad;
+
+    ImGui::Text("tau_n  = %.2e   tau_p  = %.2e s",  m.tau_n, m.tau_p);
+    ImGui::Text("C_n    = %.2e   C_p    = %.2e cm^6/s", m.C_n_aug, m.C_p_aug);
+    ImGui::Text("B_rad  = %.2e cm^3/s   (%s gap)",
+                m.B_rad, m.isDirectBandgap ? "DIRECT" : "indirect");
+    ImGui::Spacing();
+    ImGui::Text("R_SRH  = %.3e cm^-3 / s",  R_srh);
+    ImGui::Text("R_Aug  = %.3e cm^-3 / s",  R_aug);
+    ImGui::Text("R_rad  = %.3e cm^-3 / s",  R_rad);
+    ImGui::Text("U_net  = %.3e cm^-3 / s",  U_net);
+
+    if (U_net > 0.0) {
+        const double f_srh = R_srh / U_net;
+        const double f_aug = R_aug / U_net;
+        const double f_rad = R_rad / U_net;
+        ImGui::Text("Shares  SRH %.1f%%   Aug %.1f%%   Rad %.1f%%",
+                    100.0 * f_srh, 100.0 * f_aug, 100.0 * f_rad);
+
+        const char* dominant =
+            (f_srh >= f_aug && f_srh >= f_rad) ? "SRH-dominated (trap-assisted)" :
+            (f_aug >= f_rad)                   ? "Auger-dominated (heavy doping / high injection)"
+                                               : "Radiative-dominated (direct-gap LED regime)";
+        ImVec4 col = (f_rad > 0.5) ? ImVec4(0.40f, 0.85f, 1.0f, 1.0f)
+                                    : (f_aug > 0.5) ? ImVec4(1.0f, 0.55f, 0.30f, 1.0f)
+                                                    : ImVec4(0.75f, 0.85f, 0.95f, 1.0f);
+        ImGui::TextColored(col, "%s", dominant);
     }
 
     // ---- Chynoweth + Kane probe ----------------------------------------
@@ -2099,7 +2147,7 @@ int main() {
             static_cast<float>(physics->getTemperature()));
 
         // ---- Simulation step ----------------------------------------------
-        crystal->update(dt, *physics);
+        crystal->update(dt, *physics, *dd);
         dd->step(dt);
         physics->setDriftDiffusionExcess(dd->globalExcess());
 

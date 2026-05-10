@@ -47,8 +47,16 @@ public:
     // Sync atoms / carriers from the current physics state.
     void rebuild(const PhysicsEngine& physics);
 
-    // Per-frame carrier random walk + Lorentz rotation.
-    void update(float dt, const PhysicsEngine& physics);
+    // Per-frame carrier transport: drift in the real E-field pulled from
+    // the DriftDiffusion grid (v = +/- mu * E with Caughey-Thomas
+    // saturation), Einstein-relation thermal diffusion (D = mu V_T),
+    // and an optional Lorentz / Hall rotation on the drift vector when
+    // a magnetic field is present.  Zero-allocation hot-path: m_carriers
+    // is iterated in-place, the std::normal_distribution is stack-local
+    // (stateless per-call), and m_rng is reused.
+    void update(float dt,
+                const PhysicsEngine&  physics,
+                const DriftDiffusion& dd);
 
     // Composite the layered scene to the internal RenderTexture.
     void render(const PhysicsEngine&  physics,

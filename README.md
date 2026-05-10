@@ -221,12 +221,12 @@ top of each other (every later phase keeps the earlier ones' UI intact).
 | 4     | **Scharfetter-Gummel + transient + AC**     | Robust SG flux + Bernoulli function; Backward-Euler transient; Caughey-Thomas high-field saturation; AC small-signal.    |
 | 4+    | **SRH / Auger / BTBT recombination**        | Full detailed-balance R<sub>SRH</sub>, three-particle R<sub>Aug</sub>, Kane band-to-band tunnelling source.              |
 | 5     | **Wachutka electrothermal + heterojunctions** | Per-cell &rho;C<sub>p</sub>&part;<sub>t</sub>T = &nabla;&middot;(&kappa;&nabla;T) + H with Joule + recombination heat; Anderson-rule &Delta;E<sub>c</sub>/&Delta;E<sub>v</sub> for Si/Ge/GaAs heteroepitaxy.|
+| 6     | **Radiative recombination + JSON presets** | Direct-gap R<sub>rad</sub> = B<sub>rad</sub>(np - n<sub>i</sub><sup>2</sup>) wired into the continuity source (Si / GaAs / Ge per-material B); versioned `khaos_preset.json` save/load via `nlohmann/json` for the painter doping map, V<sub>a</sub>, AC + transient settings. |
 
 ### Planned
 
 | Phase | Focus                                       | Notes                                                                                                                                                                  |
 | :---: | ------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 6     | **JSON state save / restore**               | One-file dump of the painter doping map, material grid, V<sub>a</sub>, T<sub>amb</sub>, AC settings, and the latest &psi;/n/p/T fields. Drop-in `nlohmann/json` schema with semantic versioning so old captures keep loading. |
 | 7     | Newton-coupled Poisson-DD                   | Drop-in alternative to the decoupled Gummel iteration with Jacobian-free Newton-Krylov for stiff devices (avalanche, deep submicron).                                 |
 | 8     | Adaptive non-uniform grid                   | Local refinement around junctions and depletion edges; doubles spatial accuracy at the same cell count.                                                               |
 | 9     | Frequency-domain AC sweeper                 | Phasor-domain solve of small-signal G(&omega;), C(&omega;), Y/Z parameters; sweep export to CSV / Touchstone.                                                          |
