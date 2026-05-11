@@ -79,6 +79,31 @@ enum class BrushKind : std::uint8_t {
 };
 
 
+// -----------------------------------------------------------------------------
+// Solver method selector (Phase 7).
+//
+//   Gummel  : decoupled outer loop -- Poisson, then n, then p, then repeat.
+//             Cheap per iteration; converges well for moderate bias.
+//             Stalls or diverges on stiff cases (avalanche near
+//             breakdown, heavy Auger, BTBT-dominated reverse bias).
+//
+//   Newton  : fully-coupled Newton-Raphson on (psi, n, p) simultaneously.
+//             Each outer step solves a 3N x 3N linearised system with a
+//             custom, zero-allocation Jacobian-Free Newton-Krylov
+//             (BiCGSTAB inner). Quadratic convergence near the solution;
+//             survives stiff regimes the Gummel cannot handle. Heavier
+//             per iteration.
+//
+// References: Selberherr Sec. 7.4 (Newton); van der Vorst, SIAM J. Sci.
+// Stat. Comput. 13 (1992) 631 (BiCGSTAB); Knoll & Keyes, J. Comput.
+// Phys. 193 (2004) 357 (JFNK survey).
+// -----------------------------------------------------------------------------
+enum class SolverMethod : std::uint8_t {
+    Gummel = 0,
+    Newton = 1,
+};
+
+
 class DriftDiffusion {
 public:
     DriftDiffusion(int gridW = 60, int gridH = 40);
@@ -331,6 +356,47 @@ public:
         double T_lattice,
         double dV = 0.005) noexcept;
 
+    // ---- Phase 7 -- Fully-coupled Newton-Raphson -----------------------
+    //
+    // Solves the *coupled* nonlinear system F(x) = 0 with
+    //   x = [psi(0..N), n(0..N), p(0..N)]      (length 3N)
+    //   F = [F_psi, F_n, F_p]                  (Poisson + 2 continuities)
+    //
+    // Each Newton outer step requires the linearised system J Dx = -F.
+    // We never form J explicitly: Jacobian-Free Newton-Krylov approximates
+    //
+    //     J v = ( F(x + eps v) - F(x) ) / eps
+    //
+    // and feeds the (matrix-free) matvec into BiCGSTAB.  Strictly zero-
+    // allocation: every scratch buffer is sized once in the constructor
+    // and reused across calls.  Damping + psi-clamp keep the iteration
+    // robust in stiff regimes (avalanche, heavy Auger, BTBT reverse bias).
+    //
+    // newton_iters  : outer Newton-Raphson steps
+    // bicg_iters    : inner BiCGSTAB iterations per Newton step
+    // bicg_tol      : relative BiCGSTAB tolerance ||r||/||b|| <= tol
+    // newton_tol    : ||F||_inf below which Newton is declared converged
+    // damping       : 0 < alpha <= 1 applied to the Newton step
+    //
+    // Returns ||F||_inf at the end of the last Newton iteration.
+    [[nodiscard]] double solveNewton(
+        double n_i, double V_T, double epsilon_r,
+        double mu_n_bulk, double mu_p_bulk,
+        const material::Profile& mat,
+        double T_lattice          = 300.0,
+        int    newton_iters       = 8,
+        int    bicg_iters         = 40,
+        double bicg_tol           = 1.0e-4,
+        double newton_tol         = 1.0e-2,
+        double damping            = 0.7) noexcept;
+
+    // UI / introspection.
+    void  setSolverMethod(SolverMethod m) noexcept { m_solver_method = m; }
+    [[nodiscard]] SolverMethod solverMethod() const noexcept { return m_solver_method; }
+    [[nodiscard]] double newtonLastResidualInf() const noexcept { return m_nk_last_resid; }
+    [[nodiscard]] int    newtonLastIterations()  const noexcept { return m_nk_last_iters; }
+    [[nodiscard]] int    bicgLastIterations()    const noexcept { return m_bicg_last_iters; }
+
     // ---- Phase 5 -- Wachutka local heat equation ------------------------
     //
     // Solves the lattice-heat equation on the grid:
@@ -447,6 +513,57 @@ private:
     // outer iteration.
     void applyContactBoundaries(double n_i, double V_T) noexcept;
 
+    // ---- Phase 7 -- Newton inner helpers --------------------------------
+    //
+    // F(x) where x = [psi | n | p].  Pure-functional: reads only from x,
+    // m_Nd, m_Na, m_contact and the supplied scalars (does NOT touch
+    // m_psi / m_n_dens / m_p_dens). This keeps JFNK matvec consistent
+    // even when called recursively from BiCGSTAB.
+    //
+    // For transient mode (m_dt > 0, m_transient_enabled): the BE term
+    //   (x_n - n_old) / dt
+    // is added to F_n and similarly for F_p, using m_n_dens_old /
+    // m_p_dens_old as the previous time-step snapshot.
+    void computeResidual(
+        std::span<const double> x,
+        std::span<double>       F,
+        double n_i, double V_T, double epsilon_r,
+        double mu_n_bulk, double mu_p_bulk,
+        const material::Profile& mat,
+        double T_lattice) const noexcept;
+
+    // BiCGSTAB linear solve  J Dx = b  with matrix-free matvec.
+    // Returns the number of iterations actually performed (a value of
+    // max_iter means the tolerance was not reached).
+    [[nodiscard]] int bicgstabSolve(
+        std::span<const double> b,
+        std::span<double>       x_out,
+        int max_iter, double tol,
+        // Parameters forwarded to JFNK so the residual sees the same
+        // physical state across all matvecs in this Newton step.
+        std::span<const double> x_base,
+        std::span<const double> F_base,
+        double n_i, double V_T, double epsilon_r,
+        double mu_n_bulk, double mu_p_bulk,
+        const material::Profile& mat,
+        double T_lattice) noexcept;
+
+    // JFNK matrix-vector product  Jv ~ (F(x + eps v) - F(x)) / eps
+    void jfnkMatvec(
+        std::span<const double> v,
+        std::span<double>       Jv,
+        std::span<const double> x_base,
+        std::span<const double> F_base,
+        double n_i, double V_T, double epsilon_r,
+        double mu_n_bulk, double mu_p_bulk,
+        const material::Profile& mat,
+        double T_lattice) noexcept;
+
+    // Pack m_psi / m_n_dens / m_p_dens -> flat double vector (and back).
+    // Used to set up the Newton initial guess and to commit the result.
+    void packState  (std::span<double>       x) const noexcept;
+    void unpackState(std::span<const double> x)       noexcept;
+
     // ---- Index helpers --------------------------------------------------
     [[nodiscard]] inline std::size_t idx(int i, int j) const noexcept {
         return static_cast<std::size_t>(j) * static_cast<std::size_t>(m_W)
@@ -511,6 +628,25 @@ private:
     double m_ac_freq    = 1.0e6;          // [Hz]
     double m_ac_amp     = 0.005;          // [V]
     float  m_V_dc_base  = 0.0f;           // DC operating point used by AC
+
+    // ---- Phase 7 -- Newton / BiCGSTAB scratch buffers -------------------
+    // All sized to 3 * W * H in the constructor.  Doubles for the linear
+    // solver (the inner products are sensitive to precision loss).
+    SolverMethod        m_solver_method   = SolverMethod::Gummel;
+    std::vector<double> m_nk_x;           // Newton state (current)
+    std::vector<double> m_nk_dx;          // Newton update
+    std::vector<double> m_nk_F;           // residual at x
+    std::vector<double> m_nk_F_pert;      // residual at (x + eps v)
+    std::vector<double> m_nk_x_pert;      // x + eps v scratch
+    std::vector<double> m_bicg_r;         // BiCGSTAB residual
+    std::vector<double> m_bicg_rh;        // shadow residual
+    std::vector<double> m_bicg_p;         // search direction
+    std::vector<double> m_bicg_v;         // A * p
+    std::vector<double> m_bicg_s;         // intermediate residual
+    std::vector<double> m_bicg_t;         // A * s
+    double              m_nk_last_resid    = 0.0;
+    int                 m_nk_last_iters    = 0;
+    int                 m_bicg_last_iters  = 0;
 
     // ---- Phase 5 -- Heterojunctions + Wachutka thermal -----------------
     //

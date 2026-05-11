@@ -46,6 +46,19 @@ DriftDiffusion::DriftDiffusion(int gridW, int gridH)
     // Phase 5: Wachutka thermal extras
     , m_T_old      (static_cast<std::size_t>(gridW * gridH), 300.0f)
     , m_H_gen      (static_cast<std::size_t>(gridW * gridH), 0.0f)
+    // Phase 7: Newton-Krylov scratch (3 unknowns per cell -- doubles for
+    // the linear-solver inner products to stay numerically stable).
+    , m_nk_x      (static_cast<std::size_t>(3 * gridW * gridH), 0.0)
+    , m_nk_dx     (static_cast<std::size_t>(3 * gridW * gridH), 0.0)
+    , m_nk_F      (static_cast<std::size_t>(3 * gridW * gridH), 0.0)
+    , m_nk_F_pert (static_cast<std::size_t>(3 * gridW * gridH), 0.0)
+    , m_nk_x_pert (static_cast<std::size_t>(3 * gridW * gridH), 0.0)
+    , m_bicg_r    (static_cast<std::size_t>(3 * gridW * gridH), 0.0)
+    , m_bicg_rh   (static_cast<std::size_t>(3 * gridW * gridH), 0.0)
+    , m_bicg_p    (static_cast<std::size_t>(3 * gridW * gridH), 0.0)
+    , m_bicg_v    (static_cast<std::size_t>(3 * gridW * gridH), 0.0)
+    , m_bicg_s    (static_cast<std::size_t>(3 * gridW * gridH), 0.0)
+    , m_bicg_t    (static_cast<std::size_t>(3 * gridW * gridH), 0.0)
 {}
 
 
@@ -1881,4 +1894,545 @@ double DriftDiffusion::smallSignalConductance(
     setAppliedBias(V_save);
 
     return (J_plus - J_minus) / (2.0 * dV);
+}
+
+
+// =============================================================================
+// Phase 7 -- Fully-coupled Newton-Raphson with JFNK + BiCGSTAB
+// -----------------------------------------------------------------------------
+// Layout of the 3N-long state vector x:
+//
+//     [ psi(0) ... psi(N-1) | n(0) ... n(N-1) | p(0) ... p(N-1) ]
+//
+//   k_psi = idx(i,j)
+//   k_n   = N + idx(i,j)
+//   k_p   = 2N + idx(i,j)
+//
+// The same layout is used for the residual F(x). Contact cells contribute
+// pure Dirichlet residuals (x - x_bc); interior cells emit the standard
+// drift-diffusion residuals.
+//
+// References: Selberherr Sec. 7.4 (coupled Newton); van der Vorst, SIAM
+// J. Sci. Stat. Comput. 13 (1992) 631 (BiCGSTAB); Knoll & Keyes,
+// J. Comput. Phys. 193 (2004) 357 (JFNK survey).
+// =============================================================================
+namespace {
+
+// Inner-product / norm helpers. Pure-functional, no allocation.
+[[nodiscard]] double dot(std::span<const double> a,
+                         std::span<const double> b) noexcept {
+    double s = 0.0;
+    const std::size_t n = std::min(a.size(), b.size());
+    for (std::size_t i = 0; i < n; ++i) s += a[i] * b[i];
+    return s;
+}
+
+[[nodiscard]] double norm2(std::span<const double> a) noexcept {
+    return std::sqrt(dot(a, a));
+}
+
+[[nodiscard]] double normInf(std::span<const double> a) noexcept {
+    double m = 0.0;
+    for (double v : a) m = std::max(m, std::abs(v));
+    return m;
+}
+
+void axpy(double a, std::span<const double> x,
+          std::span<double> y) noexcept {
+    const std::size_t n = std::min(x.size(), y.size());
+    for (std::size_t i = 0; i < n; ++i) y[i] += a * x[i];
+}
+
+void scaleAndAdd(std::span<double> y, double a,
+                 std::span<const double> x) noexcept {
+    // y = a * y + x  (slightly different op than axpy; useful for BiCGSTAB)
+    const std::size_t n = std::min(x.size(), y.size());
+    for (std::size_t i = 0; i < n; ++i) y[i] = a * y[i] + x[i];
+}
+
+} // namespace
+
+
+void DriftDiffusion::packState(std::span<double> x) const noexcept {
+    const std::size_t N = static_cast<std::size_t>(m_W) *
+                          static_cast<std::size_t>(m_H);
+    if (x.size() < 3 * N) return;
+    for (std::size_t k = 0; k < N; ++k) {
+        x[k]         = static_cast<double>(m_psi[k]);
+        x[N + k]     = static_cast<double>(m_n_dens[k]);
+        x[2 * N + k] = static_cast<double>(m_p_dens[k]);
+    }
+}
+
+void DriftDiffusion::unpackState(std::span<const double> x) noexcept {
+    const std::size_t N = static_cast<std::size_t>(m_W) *
+                          static_cast<std::size_t>(m_H);
+    if (x.size() < 3 * N) return;
+    for (std::size_t k = 0; k < N; ++k) {
+        m_psi   [k] = static_cast<float>(x[k]);
+        // Density floor: BiCGSTAB intermediate states may dip below 0,
+        // but the committed state must stay physical for the next
+        // residual / Gummel call.
+        m_n_dens[k] = static_cast<float>(std::max(x[N     + k], 0.0));
+        m_p_dens[k] = static_cast<float>(std::max(x[2 * N + k], 0.0));
+    }
+}
+
+
+// =============================================================================
+// Residual evaluator -- F(x) for the full drift-diffusion system
+// -----------------------------------------------------------------------------
+// Per non-contact cell (i,j):
+//
+//   F_psi = (eps_s / h^2) [psi_E + psi_W + psi_N + psi_S - 4 psi_C]
+//         + q (p_C - n_C + Nd - Na)                              [Sze 2.4]
+//
+//   F_n   = (V_T / h^2) [ mu_E B(x_E) n_E + mu_W B(-x_W) n_W
+//                       + mu_N B(x_N) n_N + mu_S B(-x_S) n_S
+//                       - (mu_E B(-x_E) + mu_W B(x_W)
+//                        + mu_N B(-x_N) + mu_S B(x_S)) n_C ]
+//         + (G_BTBT - U_net)                                     [Selberherr 6.2]
+//
+//   F_p   = same with B(x) <-> B(-x) (opposite drift sign)
+//         + (G_BTBT - U_net)
+//
+// For transient (BE):  F_n -= (n_C - n_old) / dt;  same for F_p.
+// At contact cells:  F = x - x_bc.
+//
+// Pure-functional: reads only x + m_Nd, m_Na, m_contact, m_n_dens_old,
+// m_p_dens_old, m_V_bias, m_dt, m_transient_enabled, m_cell_pitch_cm.
+// =============================================================================
+void DriftDiffusion::computeResidual(
+    std::span<const double> x,
+    std::span<double>       F,
+    double n_i, double V_T, double epsilon_r,
+    double mu_n_bulk, double mu_p_bulk,
+    const material::Profile& mat,
+    double T_lattice) const noexcept
+{
+    const std::size_t N = static_cast<std::size_t>(m_W) *
+                          static_cast<std::size_t>(m_H);
+    if (x.size() < 3 * N || F.size() < 3 * N) return;
+    if (V_T <= 0.0 || n_i <= 0.0) return;
+
+    constexpr double eps_0_local = 8.854187817e-14;     // F/cm
+    constexpr double q           = 1.602176634e-19;     // C
+    const double eps_s = eps_0_local * epsilon_r;
+    const double h     = static_cast<double>(m_cell_pitch_cm);
+    const double h2    = h * h;
+    const double inv_dt = (m_transient_enabled && m_dt > 0.0)
+                        ? (1.0 / m_dt) : 0.0;
+
+    using PE = PhysicsEngine;
+
+    // Density floor used only for recombination & B-coefficient args to
+    // avoid log/exp of negatives during transient JFNK perturbations.
+    constexpr double DENS_FLOOR = 1.0;
+
+    for (int j = 0; j < m_H; ++j) {
+        for (int i = 0; i < m_W; ++i) {
+            const std::size_t k = idx(i, j);
+
+            // ---- Contact (Dirichlet) ---------------------------------------
+            if (m_contact[k] != 0u) {
+                const double V_metal = (m_contact[k] == 1u)
+                    ? static_cast<double>(m_V_bias) : 0.0;
+                const double Nd_C = std::max(double{m_Nd[k]}, 1.0);
+                const double Na_C = std::max(double{m_Na[k]}, 1.0);
+                const bool   isAnode = (m_contact[k] == 1u);
+                const double psi_bc = isAnode
+                    ? V_metal - V_T * std::log(Na_C / n_i)
+                    : V_metal + V_T * std::log(Nd_C / n_i);
+                const double n_bc = isAnode ? (n_i * n_i) / Na_C : Nd_C;
+                const double p_bc = isAnode ? Na_C : (n_i * n_i) / Nd_C;
+
+                F[k]         = x[k]         - psi_bc;
+                F[N + k]     = x[N + k]     - n_bc;
+                F[2 * N + k] = x[2 * N + k] - p_bc;
+                continue;
+            }
+
+            // ---- Neighbour indices (Neumann edge clamp) --------------------
+            const int ip = std::min(i + 1, m_W - 1);
+            const int im = std::max(i - 1, 0);
+            const int jp = std::min(j + 1, m_H - 1);
+            const int jm = std::max(j - 1, 0);
+            const std::size_t kE = idx(ip, j);
+            const std::size_t kW = idx(im, j);
+            const std::size_t kN = idx(i, jp);
+            const std::size_t kS = idx(i, jm);
+
+            // ---- Decode x at this stencil ----------------------------------
+            const double psi_C = x[k];
+            const double psi_E = x[kE];
+            const double psi_W = x[kW];
+            const double psi_N = x[kN];
+            const double psi_S = x[kS];
+            const double n_C   = std::max(x[N + k],  DENS_FLOOR);
+            const double n_E   = std::max(x[N + kE], DENS_FLOOR);
+            const double n_W   = std::max(x[N + kW], DENS_FLOOR);
+            const double n_N   = std::max(x[N + kN], DENS_FLOOR);
+            const double n_S   = std::max(x[N + kS], DENS_FLOOR);
+            const double p_C   = std::max(x[2 * N + k],  DENS_FLOOR);
+            const double p_E   = std::max(x[2 * N + kE], DENS_FLOOR);
+            const double p_W   = std::max(x[2 * N + kW], DENS_FLOOR);
+            const double p_N   = std::max(x[2 * N + kN], DENS_FLOOR);
+            const double p_S   = std::max(x[2 * N + kS], DENS_FLOOR);
+
+            // ---- F_psi: Poisson 5-point + charge density -------------------
+            const double rho =
+                p_C - n_C
+                + static_cast<double>(m_Nd[k]) - static_cast<double>(m_Na[k]);
+            F[k] = (eps_s / h2) *
+                   (psi_E + psi_W + psi_N + psi_S - 4.0 * psi_C)
+                 + q * rho;
+
+            // ---- SG coefficients (one B(+x) and one B(-x) per face) --------
+            const double xE = (psi_E - psi_C) / V_T;
+            const double xW = (psi_C - psi_W) / V_T;
+            const double xN = (psi_N - psi_C) / V_T;
+            const double xS = (psi_C - psi_S) / V_T;
+            const double bE  = PE::bernoulli( xE);
+            const double bnE = PE::bernoulli(-xE);
+            const double bW  = PE::bernoulli( xW);
+            const double bnW = PE::bernoulli(-xW);
+            const double bN  = PE::bernoulli( xN);
+            const double bnN = PE::bernoulli(-xN);
+            const double bS  = PE::bernoulli( xS);
+            const double bnS = PE::bernoulli(-xS);
+
+            // ---- Per-face mobility (Matthiessen + Caughey-Thomas) ----------
+            // |E|_face from one-sided psi difference.  Local doping at face
+            // is the arithmetic mean of the two adjoining cells.
+            const double E_E = std::abs(psi_E - psi_C) / h;
+            const double E_W = std::abs(psi_C - psi_W) / h;
+            const double E_N = std::abs(psi_N - psi_C) / h;
+            const double E_S = std::abs(psi_C - psi_S) / h;
+            const double Nf_E = 0.5 * (m_Nd[k] + m_Nd[kE]
+                                      + m_Na[k] + m_Na[kE]);
+            const double Nf_W = 0.5 * (m_Nd[k] + m_Nd[kW]
+                                      + m_Na[k] + m_Na[kW]);
+            const double Nf_N = 0.5 * (m_Nd[k] + m_Nd[kN]
+                                      + m_Na[k] + m_Na[kN]);
+            const double Nf_S = 0.5 * (m_Nd[k] + m_Nd[kS]
+                                      + m_Na[k] + m_Na[kS]);
+            const double muE_n = (Nf_E > 1.0e10)
+                ? PE::localMobilityElectron(mat, T_lattice, Nf_E, E_E)
+                : mu_n_bulk;
+            const double muW_n = (Nf_W > 1.0e10)
+                ? PE::localMobilityElectron(mat, T_lattice, Nf_W, E_W)
+                : mu_n_bulk;
+            const double muN_n = (Nf_N > 1.0e10)
+                ? PE::localMobilityElectron(mat, T_lattice, Nf_N, E_N)
+                : mu_n_bulk;
+            const double muS_n = (Nf_S > 1.0e10)
+                ? PE::localMobilityElectron(mat, T_lattice, Nf_S, E_S)
+                : mu_n_bulk;
+            const double muE_p = (Nf_E > 1.0e10)
+                ? PE::localMobilityHole(mat, T_lattice, Nf_E, E_E)
+                : mu_p_bulk;
+            const double muW_p = (Nf_W > 1.0e10)
+                ? PE::localMobilityHole(mat, T_lattice, Nf_W, E_W)
+                : mu_p_bulk;
+            const double muN_p = (Nf_N > 1.0e10)
+                ? PE::localMobilityHole(mat, T_lattice, Nf_N, E_N)
+                : mu_p_bulk;
+            const double muS_p = (Nf_S > 1.0e10)
+                ? PE::localMobilityHole(mat, T_lattice, Nf_S, E_S)
+                : mu_p_bulk;
+
+            // ---- F_n: electron continuity in residual form -----------------
+            const double lap_n = (V_T / h2) * (
+                muE_n * bE  * n_E + muW_n * bnW * n_W
+              + muN_n * bN  * n_N + muS_n * bnS * n_S
+              - (muE_n * bnE + muW_n * bW
+               + muN_n * bnN + muS_n * bS) * n_C
+            );
+
+            // Spatially varying local n_i (Phase 5) is supported via
+            // m_ni_local when present; fall back to the global n_i if not
+            // currently meaningful (uniform material).
+            const double n_i_C = (k < m_ni_local.size())
+                ? static_cast<double>(m_ni_local[k]) : n_i;
+            const double U  = PE::netRecombination(n_C, p_C, n_i_C, mat);
+            const double Em = std::sqrt(
+                std::pow((psi_E - psi_W) / (2.0 * h), 2) +
+                std::pow((psi_N - psi_S) / (2.0 * h), 2));
+            const double G_bt = PE::kaneBTBT(
+                Em, mat.A_kane, mat.B_kane, mat.btbt_isDirect);
+
+            double F_n = lap_n + (G_bt - U);
+            if (inv_dt > 0.0) {
+                F_n -= (n_C - static_cast<double>(m_n_dens_old[k])) * inv_dt;
+            }
+            F[N + k] = F_n;
+
+            // ---- F_p: hole continuity (B(x) <-> B(-x) swap) ---------------
+            const double lap_p = (V_T / h2) * (
+                muE_p * bnE * p_E + muW_p * bW  * p_W
+              + muN_p * bnN * p_N + muS_p * bS  * p_S
+              - (muE_p * bE  + muW_p * bnW
+               + muN_p * bN  + muS_p * bnS) * p_C
+            );
+            double F_p = lap_p + (G_bt - U);
+            if (inv_dt > 0.0) {
+                F_p -= (p_C - static_cast<double>(m_p_dens_old[k])) * inv_dt;
+            }
+            F[2 * N + k] = F_p;
+        }
+    }
+}
+
+
+// =============================================================================
+// JFNK matrix-vector product:  Jv ~ (F(x + eps v) - F(x)) / eps
+// -----------------------------------------------------------------------------
+// eps_FD = sqrt(eps_machine) * (1 + ||x||_2) / ||v||_2   (Knoll/Keyes 4.4)
+// chosen to balance roundoff against truncation error.
+// =============================================================================
+void DriftDiffusion::jfnkMatvec(
+    std::span<const double> v,
+    std::span<double>       Jv,
+    std::span<const double> x_base,
+    std::span<const double> F_base,
+    double n_i, double V_T, double epsilon_r,
+    double mu_n_bulk, double mu_p_bulk,
+    const material::Profile& mat,
+    double T_lattice) noexcept
+{
+    const std::size_t n3 = x_base.size();
+    if (v.size() < n3 || Jv.size() < n3
+        || m_nk_x_pert.size() < n3 || m_nk_F_pert.size() < n3
+        || F_base.size() < n3) return;
+
+    const double v_norm = norm2(v);
+    if (v_norm <= 0.0) {
+        for (std::size_t i = 0; i < n3; ++i) Jv[i] = 0.0;
+        return;
+    }
+    const double x_norm = norm2(x_base);
+    const double eps_mach = 1.490116e-8;            // sqrt(DBL_EPSILON)
+    const double eps_fd   = eps_mach * (1.0 + x_norm) / v_norm;
+
+    for (std::size_t i = 0; i < n3; ++i)
+        m_nk_x_pert[i] = x_base[i] + eps_fd * v[i];
+
+    computeResidual(
+        std::span<const double>(m_nk_x_pert.data(), n3),
+        std::span<double>      (m_nk_F_pert.data(), n3),
+        n_i, V_T, epsilon_r,
+        mu_n_bulk, mu_p_bulk,
+        mat, T_lattice);
+
+    const double inv_eps = 1.0 / eps_fd;
+    for (std::size_t i = 0; i < n3; ++i)
+        Jv[i] = (m_nk_F_pert[i] - F_base[i]) * inv_eps;
+}
+
+
+// =============================================================================
+// BiCGSTAB linear solver (van der Vorst 1992)
+// -----------------------------------------------------------------------------
+// Solves  J dx = b  (J accessed only via JFNK matvec).
+// Standard pseudocode, with breakdown guards (rho ~ 0, omega ~ 0).
+// Initial guess x_out = 0 -- safe and avoids state coupling between Newton
+// steps.  Returns the iteration count at exit.
+// =============================================================================
+int DriftDiffusion::bicgstabSolve(
+    std::span<const double> b,
+    std::span<double>       x_out,
+    int max_iter, double tol,
+    std::span<const double> x_base,
+    std::span<const double> F_base,
+    double n_i, double V_T, double epsilon_r,
+    double mu_n_bulk, double mu_p_bulk,
+    const material::Profile& mat,
+    double T_lattice) noexcept
+{
+    const std::size_t n3 = b.size();
+    if (x_out.size() < n3) return 0;
+
+    auto R  = std::span<double>(m_bicg_r .data(), n3);
+    auto Rh = std::span<double>(m_bicg_rh.data(), n3);
+    auto P  = std::span<double>(m_bicg_p .data(), n3);
+    auto V  = std::span<double>(m_bicg_v .data(), n3);
+    auto S  = std::span<double>(m_bicg_s .data(), n3);
+    auto T  = std::span<double>(m_bicg_t .data(), n3);
+
+    // x_out = 0; r = b - A*x_out = b
+    for (std::size_t i = 0; i < n3; ++i) {
+        x_out[i] = 0.0;
+        R [i]    = b[i];
+        Rh[i]    = b[i];          // shadow residual = initial residual
+        P [i]    = 0.0;
+        V [i]    = 0.0;
+    }
+
+    const double b_norm = norm2(b);
+    if (b_norm <= 0.0) return 0;
+    const double abs_tol = tol * b_norm;
+
+    double rho_old = 1.0, alpha = 1.0, omega_bcg = 1.0;
+    int iter = 0;
+
+    for (iter = 1; iter <= max_iter; ++iter) {
+        const double rho = dot(Rh, R);
+        if (std::abs(rho) < 1.0e-30) break;   // breakdown
+
+        const double beta = (rho / rho_old) * (alpha / omega_bcg);
+        // p = r + beta * (p - omega * v)
+        for (std::size_t i = 0; i < n3; ++i)
+            P[i] = R[i] + beta * (P[i] - omega_bcg * V[i]);
+
+        jfnkMatvec(P, V,
+                   x_base, F_base,
+                   n_i, V_T, epsilon_r,
+                   mu_n_bulk, mu_p_bulk, mat, T_lattice);
+
+        const double rh_v = dot(Rh, V);
+        if (std::abs(rh_v) < 1.0e-30) break;
+        alpha = rho / rh_v;
+
+        // s = r - alpha * v
+        for (std::size_t i = 0; i < n3; ++i)
+            S[i] = R[i] - alpha * V[i];
+
+        if (norm2(S) < abs_tol) {
+            // Early convergence: x += alpha * p; done.
+            axpy(alpha, P, x_out);
+            ++iter;
+            break;
+        }
+
+        jfnkMatvec(S, T,
+                   x_base, F_base,
+                   n_i, V_T, epsilon_r,
+                   mu_n_bulk, mu_p_bulk, mat, T_lattice);
+
+        const double t_t = dot(T, T);
+        if (t_t < 1.0e-30) break;
+        omega_bcg = dot(T, S) / t_t;
+
+        // x += alpha * p + omega * s
+        for (std::size_t i = 0; i < n3; ++i)
+            x_out[i] += alpha * P[i] + omega_bcg * S[i];
+
+        // r = s - omega * t
+        for (std::size_t i = 0; i < n3; ++i)
+            R[i] = S[i] - omega_bcg * T[i];
+
+        if (norm2(R) < abs_tol) break;
+        if (std::abs(omega_bcg) < 1.0e-30) break;
+        rho_old = rho;
+    }
+    return iter;
+}
+
+
+// =============================================================================
+// solveNewton -- public outer loop
+// -----------------------------------------------------------------------------
+// 1. Seed densities (Boltzmann) on first call.
+// 2. Apply contact Dirichlet BCs to (psi, n, p).
+// 3. Pack state -> x.
+// 4. Newton loop:
+//    a. F = compute_residual(x)
+//    b. If ||F||_inf < newton_tol -> done.
+//    c. Solve J dx = -F via BiCGSTAB + JFNK.
+//    d. Damped + psi-clamped update: x += alpha * dx, |dpsi| <= V_T_clamp.
+// 5. Unpack x -> state, refresh quasi-Fermi for the BandView.
+//
+// Returns the final ||F||_inf at convergence (or after newton_iters
+// exhausted).  Designed so the call site can swap solveGummel <->
+// solveNewton freely; both produce the same (psi, n, p, phi_n, phi_p)
+// observable state.
+// =============================================================================
+double DriftDiffusion::solveNewton(
+    double n_i, double V_T, double epsilon_r,
+    double mu_n_bulk, double mu_p_bulk,
+    const material::Profile& mat,
+    double T_lattice,
+    int    newton_iters,
+    int    bicg_iters,
+    double bicg_tol,
+    double newton_tol,
+    double damping) noexcept
+{
+    const std::size_t N  = static_cast<std::size_t>(m_W) *
+                           static_cast<std::size_t>(m_H);
+    const std::size_t n3 = 3 * N;
+    if (n3 == 0 || m_nk_x.size() < n3) return 0.0;
+
+    if (!m_dens_seeded) {
+        applyContactBoundaries(n_i, V_T);
+        seedDensitiesFromBoltzmann(n_i, V_T);
+    }
+    applyContactBoundaries(n_i, V_T);
+
+    // ---- Pack initial state -----------------------------------------------
+    auto X  = std::span<double>(m_nk_x .data(), n3);
+    auto DX = std::span<double>(m_nk_dx.data(), n3);
+    auto F  = std::span<double>(m_nk_F .data(), n3);
+    packState(X);
+
+    // Psi-clamp: never accept a |Delta psi| > 1 V per Newton step.  Keeps
+    // the Boltzmann exponents (~psi/V_T) from drifting into the regime
+    // where the linearisation is meaningless.
+    constexpr double PSI_CLAMP = 1.0;
+
+    double F_inf = 0.0;
+    int    last_bicg = 0;
+    int    k_done    = 0;
+
+    for (int k = 0; k < newton_iters; ++k) {
+        // ---- F = F(x) -----------------------------------------------------
+        computeResidual(X, F,
+                        n_i, V_T, epsilon_r,
+                        mu_n_bulk, mu_p_bulk,
+                        mat, T_lattice);
+        F_inf = normInf(F);
+        k_done = k + 1;
+        if (F_inf < newton_tol) break;
+
+        // ---- b = -F -------------------------------------------------------
+        // We pass -F as the RHS to BiCGSTAB; reuse F_pert as scratch.
+        auto NF = std::span<double>(m_nk_F_pert.data(), n3);
+        for (std::size_t i = 0; i < n3; ++i) NF[i] = -F[i];
+
+        // ---- Solve J dx = -F ---------------------------------------------
+        last_bicg = bicgstabSolve(
+            std::span<const double>(NF.data(), n3),
+            DX, bicg_iters, bicg_tol,
+            std::span<const double>(X.data(), n3),
+            std::span<const double>(F.data(), n3),
+            n_i, V_T, epsilon_r,
+            mu_n_bulk, mu_p_bulk, mat, T_lattice);
+
+        // ---- Psi-clamp the update ----------------------------------------
+        // First N entries of dx are dpsi; saturate each component before
+        // applying.  Damping is applied uniformly afterwards.
+        for (std::size_t i = 0; i < N; ++i) {
+            if      (DX[i] >  PSI_CLAMP) DX[i] =  PSI_CLAMP;
+            else if (DX[i] < -PSI_CLAMP) DX[i] = -PSI_CLAMP;
+        }
+
+        // ---- Apply damped update -----------------------------------------
+        for (std::size_t i = 0; i < n3; ++i)
+            X[i] += damping * DX[i];
+
+        // Re-apply contacts so Dirichlet rows stay exact.
+        unpackState(std::span<const double>(X.data(), n3));
+        applyContactBoundaries(n_i, V_T);
+        packState(X);
+    }
+
+    // ---- Commit to live buffers + refresh quasi-Fermi ---------------------
+    unpackState(std::span<const double>(X.data(), n3));
+    refreshQuasiFermiFromDensities(n_i, V_T);
+
+    // ---- Bookkeeping for the UI -------------------------------------------
+    m_nk_last_resid   = F_inf;
+    m_nk_last_iters   = k_done;
+    m_bicg_last_iters = last_bicg;
+    return F_inf;
 }

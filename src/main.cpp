@@ -399,6 +399,14 @@ struct UIState {
     // -- Phase 3: 3D Topology window --------------------------------------
     int         topo3DField       = 0;         // 0=psi, 1=n, 2=p, 3=|E|
 
+    // -- Phase 7: Fully-coupled Newton-Raphson ----------------------------
+    int         solverMethodIdx   = 0;   // 0 = Gummel (default), 1 = Newton
+    int         newtonOuter       = 6;   // Newton-Raphson outer iters
+    int         bicgInner         = 30;  // BiCGSTAB inner iters per Newton step
+    float       bicgTol           = 1.0e-4f;
+    float       newtonTol         = 1.0e-2f;
+    float       newtonDamping     = 0.7f;
+
     // -- Phase 4: Transient / AC ------------------------------------------
     bool        transientEnabled  = false;
     float       logDt             = -9.0f;     // log10(dt[s]); -9 = 1 ns
@@ -795,13 +803,68 @@ void drawControlsWindow(PhysicsEngine& physics,
             "and rightmost columns -- paint Na on one side, Nd on the "
             "other.");
 
-        ImGui::Checkbox("Run Gummel each frame", &ui.gummelEnable);
+        ImGui::Checkbox("Run solver each frame", &ui.gummelEnable);
         HelpMarker(
-            "Gummel iteration: outer loop over Poisson -> Continuity_n "
-            "-> Continuity_p, with full quasi-Fermi splitting. Solves for "
-            "n,p under bias self-consistently. When OFF, only the "
-            "equilibrium Poisson runs (V_bias is ignored).");
+            "When ON, the selected solver runs in the main loop:\n"
+            "  Gummel : decoupled Poisson -> Continuity_n -> Continuity_p\n"
+            "  Newton : fully-coupled (psi, n, p) via JFNK + BiCGSTAB\n"
+            "When OFF, only the equilibrium Poisson is recomputed and "
+            "V_bias is ignored.");
 
+        // Solver method selector (Phase 7).
+        const char* solverLabels[] = {
+            "Gummel  (decoupled, fast)",
+            "Newton  (fully-coupled, robust)",
+        };
+        if (ImGui::Combo("Solver method", &ui.solverMethodIdx,
+                         solverLabels, IM_ARRAYSIZE(solverLabels))) {
+            dd.setSolverMethod(ui.solverMethodIdx == 0
+                ? SolverMethod::Gummel : SolverMethod::Newton);
+        }
+        HelpMarker(
+            "Gummel converges quadratically when the operating point is "
+            "moderate; near avalanche or under heavy Auger / BTBT it can "
+            "stall.\n"
+            "Newton-Raphson (Selberherr 7.4) couples Poisson + both "
+            "continuities and uses a zero-allocation Jacobian-Free "
+            "Newton-Krylov: each outer step solves J dx = -F via in-tree "
+            "BiCGSTAB. Slower per step, but survives stiff regimes.");
+
+        if (ui.solverMethodIdx == 1) {
+            ImGui::SeparatorText("Newton (Phase 7)");
+            ImGui::SliderInt  ("Newton iters",  &ui.newtonOuter, 1, 30);
+            ImGui::SliderInt  ("BiCGSTAB iters",&ui.bicgInner,   5, 200);
+            ImGui::SliderFloat("BiCGSTAB tol",  &ui.bicgTol,
+                               1.0e-8f, 1.0e-2f, "%.1e",
+                               ImGuiSliderFlags_Logarithmic);
+            ImGui::SliderFloat("Newton tol",    &ui.newtonTol,
+                               1.0e-6f, 1.0f, "%.1e",
+                               ImGuiSliderFlags_Logarithmic);
+            ImGui::SliderFloat("Damping alpha", &ui.newtonDamping,
+                               0.10f, 1.00f, "%.2f");
+            if (ImGui::Button("Run Newton now (1 solve)")) {
+                const auto& mat = physics.getMaterial();
+                ui.gummelResidual = dd.solveNewton(
+                    physics.getIntrinsicCarrier(),
+                    PhysicsEngine::thermalVoltage(physics.getTemperature()),
+                    mat.epsilon_r,
+                    physics.getElectronMobility(),
+                    physics.getHoleMobility(),
+                    mat,
+                    physics.getTemperature(),
+                    ui.newtonOuter, ui.bicgInner,
+                    static_cast<double>(ui.bicgTol),
+                    static_cast<double>(ui.newtonTol),
+                    static_cast<double>(ui.newtonDamping));
+                ui.flashStatus("Newton solve done");
+            }
+            ImGui::TextDisabled(
+                "Last: %d Newton iters, %d BiCGSTAB, ||F||_inf = %.3e",
+                dd.newtonLastIterations(),
+                dd.bicgLastIterations(),
+                dd.newtonLastResidualInf());
+        }
+        ImGui::SeparatorText("Gummel knobs");
         ImGui::SliderInt("Outer iters",     &ui.gummelOuter,    1, 20);
         ImGui::SliderInt("Poisson inner",   &ui.gummelPoissonInner,    5, 80);
         ImGui::SliderInt("Continuity inner",&ui.gummelContinuityInner, 5, 60);
@@ -2198,6 +2261,18 @@ int main() {
                         ui.T_peak_local = dd->maxTemperature();
                         ui.T_mean_local = dd->meanTemperature();
                     }
+                } else if (ui.solverMethodIdx == 1) {
+                    // Phase 7 fully-coupled Newton (steady-state).
+                    ui.gummelResidual = dd->solveNewton(
+                        n_i, V_T, mat.epsilon_r,
+                        physics->getElectronMobility(),
+                        physics->getHoleMobility(),
+                        mat,
+                        physics->getTemperature(),
+                        ui.newtonOuter, ui.bicgInner,
+                        static_cast<double>(ui.bicgTol),
+                        static_cast<double>(ui.newtonTol),
+                        static_cast<double>(ui.newtonDamping));
                 } else {
                     ui.gummelResidual = dd->solveGummel(
                         n_i, V_T, mat.epsilon_r,
