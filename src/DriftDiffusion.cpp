@@ -1866,10 +1866,10 @@ double DriftDiffusion::smallSignalConductance(
     constexpr int POISS  = 30;
     constexpr int CONT   = 18;
 
-    // J at V + dV
+    // J at V + dV  (residual discarded -- we only need the converged J)
     setAppliedBias(V_save + static_cast<float>(dV));
-    solveGummel(n_i, V_T, epsilon_r, mu_n, mu_p, mat, T_lattice,
-                OUTER, POISS, CONT, 0.85, 1.0);
+    (void)solveGummel(n_i, V_T, epsilon_r, mu_n, mu_p, mat, T_lattice,
+                      OUTER, POISS, CONT, 0.85, 1.0);
     const double J_plus  = terminalCurrentDensity(n_i, V_T, mu_n, mu_p);
 
     // restore mid-point
@@ -1879,10 +1879,10 @@ double DriftDiffusion::smallSignalConductance(
     std::copy(save_phi_n.begin(), save_phi_n.end(), m_phi_n.begin());
     std::copy(save_phi_p.begin(), save_phi_p.end(), m_phi_p.begin());
 
-    // J at V - dV
+    // J at V - dV  (residual discarded -- we only need the converged J)
     setAppliedBias(V_save - static_cast<float>(dV));
-    solveGummel(n_i, V_T, epsilon_r, mu_n, mu_p, mat, T_lattice,
-                OUTER, POISS, CONT, 0.85, 1.0);
+    (void)solveGummel(n_i, V_T, epsilon_r, mu_n, mu_p, mat, T_lattice,
+                      OUTER, POISS, CONT, 0.85, 1.0);
     const double J_minus = terminalCurrentDensity(n_i, V_T, mu_n, mu_p);
 
     // Restore.
@@ -1941,13 +1941,6 @@ void axpy(double a, std::span<const double> x,
           std::span<double> y) noexcept {
     const std::size_t n = std::min(x.size(), y.size());
     for (std::size_t i = 0; i < n; ++i) y[i] += a * x[i];
-}
-
-void scaleAndAdd(std::span<double> y, double a,
-                 std::span<const double> x) noexcept {
-    // y = a * y + x  (slightly different op than axpy; useful for BiCGSTAB)
-    const std::size_t n = std::min(x.size(), y.size());
-    for (std::size_t i = 0; i < n; ++i) y[i] = a * y[i] + x[i];
 }
 
 } // namespace

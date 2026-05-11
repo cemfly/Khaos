@@ -629,25 +629,6 @@ private:
     double m_ac_amp     = 0.005;          // [V]
     float  m_V_dc_base  = 0.0f;           // DC operating point used by AC
 
-    // ---- Phase 7 -- Newton / BiCGSTAB scratch buffers -------------------
-    // All sized to 3 * W * H in the constructor.  Doubles for the linear
-    // solver (the inner products are sensitive to precision loss).
-    SolverMethod        m_solver_method   = SolverMethod::Gummel;
-    std::vector<double> m_nk_x;           // Newton state (current)
-    std::vector<double> m_nk_dx;          // Newton update
-    std::vector<double> m_nk_F;           // residual at x
-    std::vector<double> m_nk_F_pert;      // residual at (x + eps v)
-    std::vector<double> m_nk_x_pert;      // x + eps v scratch
-    std::vector<double> m_bicg_r;         // BiCGSTAB residual
-    std::vector<double> m_bicg_rh;        // shadow residual
-    std::vector<double> m_bicg_p;         // search direction
-    std::vector<double> m_bicg_v;         // A * p
-    std::vector<double> m_bicg_s;         // intermediate residual
-    std::vector<double> m_bicg_t;         // A * s
-    double              m_nk_last_resid    = 0.0;
-    int                 m_nk_last_iters    = 0;
-    int                 m_bicg_last_iters  = 0;
-
     // ---- Phase 5 -- Heterojunctions + Wachutka thermal -----------------
     //
     // Per-cell material id (encodes material::Kind). Cells flagged as
@@ -685,6 +666,29 @@ private:
     std::vector<float> m_T_old;
     std::vector<float> m_H_gen;
     float              m_dT_max_last = 0.0f;
+
+    // ---- Phase 7 -- Newton / BiCGSTAB scratch buffers -------------------
+    // Declared *after* the Phase 5 thermal members so the constructor's
+    // initialiser-list order (Phase 5 -> Phase 7) matches the in-class
+    // declaration order (Phase 5 -> Phase 7) and silences -Wreorder.
+    //
+    // All sized to 3 * W * H in the constructor.  Doubles for the linear
+    // solver (the inner products are sensitive to precision loss).
+    SolverMethod        m_solver_method   = SolverMethod::Gummel;
+    std::vector<double> m_nk_x;           // Newton state (current)
+    std::vector<double> m_nk_dx;          // Newton update
+    std::vector<double> m_nk_F;           // residual at x
+    std::vector<double> m_nk_F_pert;      // residual at (x + eps v)
+    std::vector<double> m_nk_x_pert;      // x + eps v scratch
+    std::vector<double> m_bicg_r;         // BiCGSTAB residual
+    std::vector<double> m_bicg_rh;        // shadow residual
+    std::vector<double> m_bicg_p;         // search direction
+    std::vector<double> m_bicg_v;         // A * p
+    std::vector<double> m_bicg_s;         // intermediate residual
+    std::vector<double> m_bicg_t;         // A * s
+    double              m_nk_last_resid    = 0.0;
+    int                 m_nk_last_iters    = 0;
+    int                 m_bicg_last_iters  = 0;
 
     // Internal: refresh the per-cell heterojunction caches (n_i, eps_r,
     // chi-shifts) using the current m_T grid and m_mat ids. Called by

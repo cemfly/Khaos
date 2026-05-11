@@ -778,7 +778,6 @@ void drawControlsWindow(PhysicsEngine& physics,
         // Material/Engine state. A useful sanity check next to the
         // Poisson-derived V_bi shown in the spatial band view.
         const auto&  m   = physics.getMaterial();
-        const double n_i = physics.getIntrinsicCarrier();
         const double V_T = PhysicsEngine::thermalVoltage(physics.getTemperature());
         const double L_D = PhysicsEngine::debyeLengthCm(
             m.epsilon_r, std::max(physics.getDopingConcentration(), 1.0e10),

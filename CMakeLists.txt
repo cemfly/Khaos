@@ -32,7 +32,7 @@ project(SemiconductorSim
 # -----------------------------------------------------------------------------
 # Compiler / language
 # -----------------------------------------------------------------------------
-set(CMAKE_CXX_STANDARD          20)
+set(CMAKE_CXX_STANDARD          23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS        OFF)
 
@@ -101,10 +101,19 @@ find_package(SFML 3 COMPONENTS Graphics Window System QUIET)
 if(NOT SFML_FOUND)
     if(FETCH_SFML)
         message(STATUS "SFML not found -- fetching")
+        # Khaos only uses Graphics / Window / System.  Disabling the
+        # audio / network modules drops the OpenAL + Vorbis + Flac
+        # build-time dependency chain on Linux CI runners.
+        set(SFML_BUILD_AUDIO    OFF CACHE INTERNAL "")
+        set(SFML_BUILD_NETWORK  OFF CACHE INTERNAL "")
+        set(SFML_BUILD_EXAMPLES OFF CACHE INTERNAL "")
+        set(SFML_BUILD_DOC      OFF CACHE INTERNAL "")
         FetchContent_Declare(
             SFML
             GIT_REPOSITORY https://github.com/SFML/SFML.git
             GIT_TAG        3.0.0
+            GIT_SHALLOW    TRUE
+            GIT_PROGRESS   TRUE
         )
         FetchContent_MakeAvailable(SFML)
     else()

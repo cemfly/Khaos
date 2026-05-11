@@ -196,7 +196,6 @@ void CrystalView::update(float dt,
     const float yMin = m_topLeft.y + 2.f;
     const float yMax = m_topLeft.y + m_size.y - 2.f;
     const float xSpan = xMax - xMin;
-    const float ySpan = yMax - yMin;
 
     // ---- Stack-local RNG state (no allocation, stateless distributions) ----
     std::normal_distribution<float>  thermal(0.0f, 1.0f);

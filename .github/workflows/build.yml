@@ -70,7 +70,8 @@ jobs:
         run: |
           cmake -S . -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
-            -DBUILD_TESTS=ON
+            -DBUILD_TESTS=ON \
+            -DFETCH_SFML=ON
 
       - name: Build
         run: cmake --build build --parallel
@@ -135,7 +136,8 @@ jobs:
           cmake -S . -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Debug \
             -DBUILD_TESTS=ON \
-            -DUSE_SANITIZER=ON
+            -DUSE_SANITIZER=ON \
+            -DFETCH_SFML=ON
 
       - name: Build
         run: cmake --build build --parallel
